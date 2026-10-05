@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -16,6 +17,25 @@ import (
 
 	"github.com/reihanboo/ember/internal/proc"
 )
+
+func TestWriteVersion(t *testing.T) {
+	previousVersion := version
+	version = "v1.2.3"
+	t.Cleanup(func() {
+		version = previousVersion
+	})
+
+	var stdout bytes.Buffer
+	if !writeVersion([]string{"--version"}, &stdout) {
+		t.Fatal("writeVersion returned false for --version")
+	}
+	if got, want := stdout.String(), "ember v1.2.3\n"; got != want {
+		t.Fatalf("version output = %q, want %q", got, want)
+	}
+	if writeVersion([]string{"run"}, &stdout) {
+		t.Fatal("writeVersion returned true for a command")
+	}
+}
 
 func TestSignalShutdownStopsChildren(t *testing.T) {
 	command := exec.Command(os.Args[0], "-test.run=^TestSignalShutdownHelper$", "-test.v")

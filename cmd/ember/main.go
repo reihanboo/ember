@@ -11,7 +11,12 @@ import (
 	"github.com/reihanboo/ember/internal/proc"
 )
 
+var version = "dev"
+
 func main() {
+	if writeVersion(os.Args[1:], os.Stdout) {
+		return
+	}
 	ctx, stopSignals := newSignalContext()
 	registry := &proc.Registry{}
 	status := runWithShutdown(ctx, registry, func(ctx context.Context, registry *proc.Registry) int {
@@ -19,6 +24,14 @@ func main() {
 	}, os.Stderr)
 	stopSignals()
 	os.Exit(status)
+}
+
+func writeVersion(args []string, stdout io.Writer) bool {
+	if len(args) != 1 || args[0] != "--version" {
+		return false
+	}
+	fmt.Fprintf(stdout, "ember %s\n", version)
+	return true
 }
 
 func runWithShutdown(ctx context.Context, registry *proc.Registry, run func(context.Context, *proc.Registry) int, stderr io.Writer) int {

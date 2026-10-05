@@ -12,6 +12,7 @@
 | `ember status` | Show the current state and last build details. |
 | `ember init` | Create a starter `ember.toml` in the current directory. |
 | `ember run --verbose` | Show changed paths, build IDs, and timings. |
+| `ember --version` | Show the release version. |
 | `ember -h` | Show the command list. |
 
 `--verbose` is global and can also go before the command: `ember --verbose run`.
