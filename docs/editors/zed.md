@@ -35,4 +35,4 @@ Add this object to the array in your `keymap.json` file. It binds `Ctrl+Alt+R` w
 ]
 ```
 
-On Windows, open the keymap file with Zed's `zed: open keymap file` command; it is usually under `%AppData%\Roaming\Zed\keymap.json`. For the task and keymap formats, see the [Zed tasks](https://zed.dev/docs/tasks) and [key bindings](https://zed.dev/docs/key-bindings) docs.
+On Windows, open the keymap file with Zed's `zed: open keymap file` command. It is usually under `%AppData%\Roaming\Zed\keymap.json`. For the task and keymap formats, see the [Zed tasks](https://zed.dev/docs/tasks) and [key bindings](https://zed.dev/docs/key-bindings) docs.
