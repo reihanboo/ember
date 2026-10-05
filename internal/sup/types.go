@@ -34,7 +34,8 @@ type ChildExitEvent struct {
 }
 
 type BuildFinishedEvent struct {
-	Result build.Result
+	BuildID uint64
+	Result  build.Result
 }
 
 func (FileChanged) isEvent()        {}

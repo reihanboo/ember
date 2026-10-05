@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -215,6 +216,110 @@ func (builder controlledBuilder) Build(ctx context.Context, spec build.Spec) bui
 	case <-ctx.Done():
 		return build.Result{Cancelled: true, Err: ctx.Err()}
 	}
+}
+
+type supersedingBuilder struct {
+	calls         chan build.Spec
+	firstCanceled chan struct{}
+	results       chan build.Result
+	mu            sync.Mutex
+	started       int
+}
+
+func (builder *supersedingBuilder) Build(ctx context.Context, spec build.Spec) build.Result {
+	builder.mu.Lock()
+	builder.started++
+	started := builder.started
+	builder.mu.Unlock()
+	builder.calls <- spec
+	if started == 1 {
+		<-ctx.Done()
+		close(builder.firstCanceled)
+		return build.Result{Cancelled: true, Err: ctx.Err()}
+	}
+	select {
+	case result := <-builder.results:
+		return result
+	case <-ctx.Done():
+		return build.Result{Cancelled: true, Err: ctx.Err()}
+	}
+}
+
+func TestNewTriggerSupersedesBuildingBuild(t *testing.T) {
+	useSupervisorWorkingDirectory(t)
+	if err := os.MkdirAll(filepath.Join(".ember", "bin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	order := make(chan string, 4)
+	builder := &supersedingBuilder{
+		calls:         make(chan build.Spec, 2),
+		firstCanceled: make(chan struct{}),
+		results:       make(chan build.Result, 1),
+	}
+	runner := &fakeRunner{calls: make(chan proc.Spec, 2), order: order, nextPID: 300}
+	logger := make(recordingLogger, 4)
+	supervisor := NewSupervisor(
+		builder,
+		runner,
+		build.Spec{Cmd: "cc -o {out}"},
+		proc.Spec{Cmd: "{out}"},
+		2*time.Second,
+		fakeClock{},
+		logger,
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runResult := make(chan error, 1)
+	go func() {
+		runResult <- supervisor.Run(ctx)
+	}()
+
+	supervisor.Send(FileChanged{Paths: []string{"main.c"}})
+	firstBuild := readBuildCall(t, builder.calls)
+	if snapshot := supervisor.Snapshot(); snapshot.State != Building {
+		t.Fatalf("state after first trigger = %s, want Building", snapshot.State)
+	}
+
+	supervisor.Send(ReloadRequested{})
+	secondBuild := readBuildCall(t, builder.calls)
+	<-builder.firstCanceled
+	if firstBuild.Cmd == secondBuild.Cmd {
+		t.Errorf("superseding build reused output command %q", secondBuild.Cmd)
+	}
+	if message := readSupervisorLog(t, logger); !strings.Contains(message, "stale build result") {
+		t.Errorf("cancelled build log = %q, want stale completion discarded", message)
+	}
+	if snapshot := supervisor.Snapshot(); snapshot.State != Building {
+		t.Errorf("state after stale completion = %s, want Building", snapshot.State)
+	}
+
+	builder.results <- build.Result{Success: true, Duration: 10 * time.Millisecond}
+	if got := readOrder(t, order); got != "start:300" {
+		t.Fatalf("runner event = %q, want one app start", got)
+	}
+	runSpec := readRunCall(t, runner.calls)
+	secondOutput := strings.TrimPrefix(secondBuild.Cmd, "cc -o ")
+	if runSpec.Cmd != secondOutput {
+		t.Errorf("run command = %q, want superseding output %q", runSpec.Cmd, secondOutput)
+	}
+	waitForSupervisorState(t, supervisor, Running)
+	if snapshot := supervisor.Snapshot(); snapshot.PID != 300 || !snapshot.LastBuildOK {
+		t.Errorf("snapshot after superseding build = %#v, want one successful app start", snapshot)
+	}
+	select {
+	case event := <-order:
+		t.Errorf("unexpected extra app operation %q", event)
+	default:
+	}
+	select {
+	case <-runner.calls:
+		t.Error("runner started more than one app")
+	default:
+	}
+
+	cancel()
+	awaitSupervisorRun(t, runResult)
 }
 
 func TestFailedBuildKeepsRunningAppUntilNextSuccess(t *testing.T) {

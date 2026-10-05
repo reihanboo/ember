@@ -49,6 +49,8 @@ type Supervisor struct {
 	process       Process
 	buildOutput   string
 	currentOutput string
+	buildID       uint64
+	buildCancel   context.CancelFunc
 	snapshot      Snapshot
 	snapshotM     sync.RWMutex
 	runM          sync.Mutex
@@ -96,6 +98,7 @@ func (s *Supervisor) Run(ctx context.Context) error {
 	s.running = true
 	s.runM.Unlock()
 	defer func() {
+		s.cancelBuild()
 		s.runM.Lock()
 		s.running = false
 		s.runM.Unlock()
@@ -131,6 +134,10 @@ func (s *Supervisor) handle(ctx context.Context, event Event) {
 	state := s.Snapshot().State
 	switch event.(type) {
 	case FileChanged, ReloadRequested:
+		if state == Building {
+			s.startBuild(ctx)
+			return
+		}
 		if state != Idle && state != Running && state != BuildFailed {
 			s.logger.Debug(fmt.Sprintf("ignored event %T %+v in state %s", event, event, state))
 			return
@@ -141,17 +148,29 @@ func (s *Supervisor) handle(ctx context.Context, event Event) {
 		}
 		s.startBuild(ctx)
 	case BuildFinishedEvent:
+		finished := event.(BuildFinishedEvent)
+		if finished.BuildID != s.buildID {
+			s.logger.Debug(fmt.Sprintf("discarded stale build result %d; active build is %d", finished.BuildID, s.buildID))
+			return
+		}
 		if state != Building {
 			s.logger.Debug(fmt.Sprintf("ignored event %T %+v in state %s", event, event, state))
 			return
 		}
-		s.finishBuild(ctx, event.(BuildFinishedEvent).Result)
+		s.cancelBuild()
+		s.finishBuild(ctx, finished.Result)
 	default:
 		s.logger.Debug(fmt.Sprintf("ignored event %T %+v in state %s", event, event, state))
 	}
 }
 
 func (s *Supervisor) startBuild(ctx context.Context) {
+	s.cancelBuild()
+	s.buildID++
+	buildID := s.buildID
+	buildCtx, cancel := context.WithCancel(ctx)
+	s.buildCancel = cancel
+
 	output := outdir.Next()
 	spec := s.buildSpec
 	spec.Cmd = outdir.Substitute(spec.Cmd, output)
@@ -162,9 +181,17 @@ func (s *Supervisor) startBuild(ctx context.Context) {
 	s.snapshotM.Unlock()
 
 	go func() {
-		result := s.builder.Build(ctx, spec)
-		s.Send(BuildFinishedEvent{Result: result})
+		result := s.builder.Build(buildCtx, spec)
+		s.Send(BuildFinishedEvent{BuildID: buildID, Result: result})
 	}()
+}
+
+func (s *Supervisor) cancelBuild() {
+	if s.buildCancel == nil {
+		return
+	}
+	s.buildCancel()
+	s.buildCancel = nil
 }
 
 func (s *Supervisor) finishBuild(ctx context.Context, result build.Result) {

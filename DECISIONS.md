@@ -7,4 +7,4 @@ Output paths start at app-1 per process; Next returns paths without creating .em
 Prune preserves .pdb/.ilk siblings for kept outputs along with the output itself.
 Supervisor events use change, control, key, child-exit, and build-finish values; invalid states stringify as Unknown.
 The event-loop skeleton logs unhandled events and injects builder, runner, clock, and logger interfaces.
-Build triggers receive a copied build.Spec with {out} substituted; triggers during Building are ignored.
+Build triggers receive a copied build.Spec with {out} substituted; a new trigger cancels and supersedes an active build.
