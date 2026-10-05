@@ -23,3 +23,4 @@ The Windows example uses `cl`, so start it from a Developer PowerShell with the 
 - [Build-system recipes](docs/build-systems.md): CMake with Ninja and Make
 - [Platform notes](docs/platform-notes.md): locked executables and WSL
 - [Zed](docs/editors/zed.md): reload the running project from a task or key binding
+- [Neovim](docs/editors/nvim.md): reload from a keymap or optional save hook
