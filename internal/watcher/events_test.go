@@ -9,48 +9,70 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/reihanboo/ember/internal/config"
 )
 
 func TestWatchEmitsDebouncedFilteredChanges(t *testing.T) {
-	root := t.TempDir()
-	for _, directory := range []string{"src", "build"} {
-		if err := os.MkdirAll(filepath.Join(root, directory), 0o700); err != nil {
-			t.Fatal(err)
+	for _, polling := range []bool{false, true} {
+		name := "fsnotify"
+		if polling {
+			name = "poller"
 		}
-	}
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			for _, directory := range []string{"src", "build"} {
+				if err := os.MkdirAll(filepath.Join(root, directory), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			settings := config.WatchConfig{
+				Paths:   []string{"src", "build"},
+				Include: []string{"src/**/*.c"},
+				Ignore:  []string{"build/**"},
+				Poll:    polling,
+			}
+			backend, err := NewWatcher(root, settings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if err := backend.Close(); err != nil {
+					t.Errorf("close watcher: %v", err)
+				}
+			}()
+			if polling {
+				if _, ok := backend.(*Poller); !ok {
+					t.Fatalf("NewWatcher() returned %T for polling config", backend)
+				}
+			} else if _, ok := backend.(*FSNotifyWatcher); !ok {
+				t.Fatalf("NewWatcher() returned %T for fsnotify config", backend)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			const delay = 200 * time.Millisecond
+			changes := backend.Watch(ctx, delay)
 
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer watcher.Close()
-	if err := RegisterDirectories(watcher, root, []string{"src", "build"}, nil); err != nil {
-		t.Fatal(err)
-	}
-	filter, err := NewFilter(root, []string{"src/**/*.c"}, []string{"build/**"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	const delay = 200 * time.Millisecond
-	changes := Watch(ctx, watcher, filter, delay)
+			quiet := 2 * delay
+			if polling {
+				quiet += pollInterval
+			}
+			matchingPath := filepath.Join(root, "src", "main.c")
+			if err := os.WriteFile(matchingPath, []byte("int main(void) {}\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			change := receiveChange(t, changes)
+			if !reflect.DeepEqual(change.Paths, []string{matchingPath}) {
+				t.Errorf("change paths = %#v, want %#v", change.Paths, []string{matchingPath})
+			}
+			assertNoChange(t, changes, quiet)
 
-	matchingPath := filepath.Join(root, "src", "main.c")
-	if err := os.WriteFile(matchingPath, []byte("int main(void) {}\n"), 0o600); err != nil {
-		t.Fatal(err)
+			ignoredPath := filepath.Join(root, "build", "ignored.c")
+			if err := os.WriteFile(ignoredPath, []byte("int ignored;\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			assertNoChange(t, changes, quiet)
+		})
 	}
-	change := receiveChange(t, changes)
-	if !reflect.DeepEqual(change.Paths, []string{matchingPath}) {
-		t.Errorf("change paths = %#v, want %#v", change.Paths, []string{matchingPath})
-	}
-	assertNoChange(t, changes, 2*delay)
-
-	ignoredPath := filepath.Join(root, "build", "ignored.c")
-	if err := os.WriteFile(ignoredPath, []byte("int ignored;\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	assertNoChange(t, changes, 2*delay)
 }
 
 func TestWatchRegistersDirectoriesCreatedAtRuntime(t *testing.T) {
@@ -108,33 +130,31 @@ func TestWatchRegistersDirectoriesCreatedAtRuntime(t *testing.T) {
 }
 
 func TestWatchStopsOnContextCancellation(t *testing.T) {
-	root := t.TempDir()
-	if err := os.Mkdir(filepath.Join(root, "src"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer watcher.Close()
-	if err := RegisterDirectories(watcher, root, []string{"src"}, nil); err != nil {
-		t.Fatal(err)
-	}
-	filter, err := NewFilter(root, []string{"**/*.c"}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	changes := Watch(ctx, watcher, filter, time.Hour)
-
-	cancel()
-	select {
-	case _, ok := <-changes:
-		if ok {
-			t.Fatal("change channel remained open after cancellation")
+	for _, polling := range []bool{false, true} {
+		name := "fsnotify"
+		if polling {
+			name = "poller"
 		}
-	case <-time.After(time.Second):
-		t.Fatal("watch goroutine did not exit after cancellation")
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.Mkdir(filepath.Join(root, "src"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			backend, err := NewWatcher(root, config.WatchConfig{
+				Paths:   []string{"src"},
+				Include: []string{"**/*.c"},
+				Poll:    polling,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer backend.Close()
+			ctx, cancel := context.WithCancel(context.Background())
+			changes := backend.Watch(ctx, time.Hour)
+
+			cancel()
+			waitForClose(t, changes)
+		})
 	}
 }
 
