@@ -22,6 +22,14 @@ type ReloadRequested struct{}
 
 type BuildOnlyRequested struct{}
 
+type StopRequested struct {
+	Reply chan error
+}
+
+type StartRequested struct {
+	Reply chan error
+}
+
 type ControlEvent struct {
 	Command string
 }
@@ -45,6 +53,8 @@ type BuildFinishedEvent struct {
 func (FileChanged) isEvent()        {}
 func (ReloadRequested) isEvent()    {}
 func (BuildOnlyRequested) isEvent() {}
+func (StopRequested) isEvent()      {}
+func (StartRequested) isEvent()     {}
 func (ControlEvent) isEvent()       {}
 func (KeyEvent) isEvent()           {}
 func (ChildExited) isEvent()        {}

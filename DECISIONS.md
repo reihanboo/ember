@@ -11,4 +11,4 @@ Build triggers receive a copied build.Spec with {out} substituted; a new trigger
 Control responses use a dot terminator line and dot-stuff payload lines beginning with a dot.
 The control server handles one valid request per connection through a synchronous response handler.
 A control instance is live only when it returns a valid response to a status probe within one second.
-Control dispatch maps reload to ReloadRequested, build to BuildOnlyRequested, and remaining commands to ControlEvent names.
+Control dispatch maps reload/build/stop/start to dedicated supervisor events and waits for stop/start replies.

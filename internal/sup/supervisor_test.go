@@ -594,6 +594,140 @@ func TestBuildOnlyDoesNotRestartRunningApp(t *testing.T) {
 	process.exit(proc.ExitResult{Code: 0})
 }
 
+func TestManualStopAndStartUsesLastBuiltOutput(t *testing.T) {
+	useSupervisorWorkingDirectory(t)
+	if err := os.MkdirAll(filepath.Join(".ember", "bin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	order := make(chan string, 8)
+	builder := successfulBuilder{calls: make(chan build.Spec, 2), order: order}
+	runner := &fakeRunner{calls: make(chan proc.Spec, 2), processes: make(chan *fakeProcess, 2), order: order, nextPID: 800}
+	logger := make(recordingLogger, 4)
+	supervisor := NewSupervisor(
+		builder,
+		runner,
+		build.Spec{Cmd: "cc -o {out}"},
+		proc.Spec{Cmd: "{out} --flag", Cwd: "."},
+		1500*time.Millisecond,
+		false,
+		fakeClock{},
+		logger,
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runResult := make(chan error, 1)
+	go func() {
+		runResult <- supervisor.Run(ctx)
+	}()
+
+	supervisor.Send(ReloadRequested{})
+	readBuildCall(t, builder.calls)
+	if got := readOrder(t, order); got != "build-ok" {
+		t.Fatalf("initial build event = %q, want build-ok", got)
+	}
+	if got := readOrder(t, order); got != "start:800" {
+		t.Fatalf("initial runner event = %q, want start:800", got)
+	}
+	readRunCall(t, runner.calls)
+	firstProcess := readFakeProcess(t, runner.processes)
+	waitForSupervisorState(t, supervisor, Running)
+
+	supervisor.Send(BuildOnlyRequested{})
+	latestBuild := readBuildCall(t, builder.calls)
+	if got := readOrder(t, order); got != "build-ok" {
+		t.Fatalf("build-only event = %q, want build-ok", got)
+	}
+	waitForSupervisorState(t, supervisor, Running)
+	if snapshot := supervisor.Snapshot(); snapshot.PID != firstProcess.Pid() {
+		t.Errorf("snapshot after build-only = %#v, want unchanged pid %d", snapshot, firstProcess.Pid())
+	}
+
+	stopReply := make(chan error, 1)
+	supervisor.Send(StopRequested{Reply: stopReply})
+	select {
+	case err := <-stopReply:
+		if err != nil {
+			t.Fatalf("stop request error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("stop request did not receive a reply")
+	}
+	if got := readOrder(t, order); got != "stop:800:1.5s" {
+		t.Errorf("stop event = %q, want stop:800:1.5s", got)
+	}
+	waitForSupervisorState(t, supervisor, Idle)
+	if snapshot := supervisor.Snapshot(); snapshot.PID != 0 {
+		t.Errorf("snapshot after stop = %#v, want pid 0", snapshot)
+	}
+
+	startReply := make(chan error, 1)
+	supervisor.Send(StartRequested{Reply: startReply})
+	select {
+	case err := <-startReply:
+		if err != nil {
+			t.Fatalf("start request error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("start request did not receive a reply")
+	}
+	if got := readOrder(t, order); got != "start:801" {
+		t.Fatalf("start event = %q, want start:801", got)
+	}
+	runSpec := readRunCall(t, runner.calls)
+	output := strings.TrimPrefix(latestBuild.Cmd, "cc -o ")
+	if runSpec.Cmd != output+" --flag" {
+		t.Errorf("started command = %q, want last successful output %q", runSpec.Cmd, output+" --flag")
+	}
+	secondProcess := readFakeProcess(t, runner.processes)
+	waitForSupervisorState(t, supervisor, Running)
+	if snapshot := supervisor.Snapshot(); snapshot.PID != secondProcess.Pid() || snapshot.PID == firstProcess.Pid() {
+		t.Errorf("snapshot after start = %#v, want new pid %d", snapshot, secondProcess.Pid())
+	}
+	select {
+	case spec := <-builder.calls:
+		t.Errorf("start request unexpectedly rebuilt with spec %#v", spec)
+	default:
+	}
+
+	cancel()
+	awaitSupervisorRun(t, runResult)
+	secondProcess.exit(proc.ExitResult{Code: 0})
+}
+
+func TestStartWithoutSuccessfulBuildReturnsError(t *testing.T) {
+	runner := &fakeRunner{calls: make(chan proc.Spec, 1), processes: make(chan *fakeProcess, 1), order: make(chan string, 1)}
+	supervisor := NewSupervisor(nil, runner, build.Spec{}, proc.Spec{Cmd: "{out}"}, 0, false, fakeClock{}, make(recordingLogger, 2))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runResult := make(chan error, 1)
+	go func() {
+		runResult <- supervisor.Run(ctx)
+	}()
+
+	reply := make(chan error, 1)
+	supervisor.Send(StartRequested{Reply: reply})
+	select {
+	case err := <-reply:
+		if err == nil || !strings.Contains(err.Error(), "no successfully built output") {
+			t.Errorf("start request error = %v, want no-successful-build error", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("start request did not receive an error reply")
+	}
+	if snapshot := supervisor.Snapshot(); snapshot.State != Idle || snapshot.PID != 0 {
+		t.Errorf("snapshot after failed start = %#v, want idle without pid", snapshot)
+	}
+	select {
+	case spec := <-runner.calls:
+		t.Errorf("start without build called runner with spec %#v", spec)
+	default:
+	}
+
+	cancel()
+	awaitSupervisorRun(t, runResult)
+}
+
 func TestSuccessfulBuildRestartsAppAndPrunesOutputs(t *testing.T) {
 	useSupervisorWorkingDirectory(t)
 	if err := os.MkdirAll(filepath.Join(".ember", "bin"), 0o700); err != nil {

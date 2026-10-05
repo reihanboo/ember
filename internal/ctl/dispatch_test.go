@@ -1,6 +1,7 @@
 package ctl
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -9,11 +10,18 @@ import (
 )
 
 type fakeEventSender struct {
-	events chan sup.Event
+	events   chan sup.Event
+	replyErr error
 }
 
 func (sender fakeEventSender) Send(event sup.Event) {
 	sender.events <- event
+	switch requested := event.(type) {
+	case sup.StopRequested:
+		requested.Reply <- sender.replyErr
+	case sup.StartRequested:
+		requested.Reply <- sender.replyErr
+	}
 }
 
 func TestDispatcherSendsSupervisorEventsAndRepliesOK(t *testing.T) {
@@ -25,8 +33,8 @@ func TestDispatcherSendsSupervisorEventsAndRepliesOK(t *testing.T) {
 	}{
 		{request: RequestReload, want: sup.ReloadRequested{}},
 		{request: RequestBuild, want: sup.BuildOnlyRequested{}},
-		{request: RequestStop, want: sup.ControlEvent{Command: "stop"}},
-		{request: RequestStart, want: sup.ControlEvent{Command: "start"}},
+		{request: RequestStop, want: sup.StopRequested{}},
+		{request: RequestStart, want: sup.StartRequested{}},
 		{request: RequestStatus, want: sup.ControlEvent{Command: "status"}},
 		{request: RequestQuit, want: sup.ControlEvent{Command: "quit"}},
 	}
@@ -34,8 +42,22 @@ func TestDispatcherSendsSupervisorEventsAndRepliesOK(t *testing.T) {
 		if response := dispatch(test.request); !reflect.DeepEqual(response, []string{"ok"}) {
 			t.Errorf("dispatch(%q) = %#v, want [\"ok\"]", test.request, response)
 		}
-		if got := <-sender.events; !reflect.DeepEqual(got, test.want) {
-			t.Errorf("event for %q = %#v, want %#v", test.request, got, test.want)
+		got := <-sender.events
+		switch test.request {
+		case RequestStop:
+			requested, ok := got.(sup.StopRequested)
+			if !ok || requested.Reply == nil {
+				t.Errorf("event for %q = %#v, want StopRequested with reply channel", test.request, got)
+			}
+		case RequestStart:
+			requested, ok := got.(sup.StartRequested)
+			if !ok || requested.Reply == nil {
+				t.Errorf("event for %q = %#v, want StartRequested with reply channel", test.request, got)
+			}
+		default:
+			if !reflect.DeepEqual(got, test.want) {
+				t.Errorf("event for %q = %#v, want %#v", test.request, got, test.want)
+			}
 		}
 	}
 }
@@ -48,6 +70,7 @@ func TestDispatcherRepliesWithErrors(t *testing.T) {
 	}{
 		{name: "missing supervisor", dispatch: NewDispatcher(nil), request: RequestReload},
 		{name: "unsupported request", dispatch: NewDispatcher(fakeEventSender{events: make(chan sup.Event, 1)}), request: Request("unknown")},
+		{name: "supervisor operation failed", dispatch: NewDispatcher(fakeEventSender{events: make(chan sup.Event, 1), replyErr: errors.New("no successful build")}), request: RequestStart},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

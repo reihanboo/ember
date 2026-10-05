@@ -15,24 +15,35 @@ func NewDispatcher(supervisor EventSender) Handler {
 		if supervisor == nil {
 			return []string{"error: control supervisor is unavailable"}
 		}
-		event, err := eventForRequest(request)
+		event, reply, err := eventForRequest(request)
 		if err != nil {
 			return []string{"error: " + err.Error()}
 		}
 		supervisor.Send(event)
+		if reply != nil {
+			if err := <-reply; err != nil {
+				return []string{"error: " + err.Error()}
+			}
+		}
 		return []string{"ok"}
 	}
 }
 
-func eventForRequest(request Request) (sup.Event, error) {
+func eventForRequest(request Request) (sup.Event, <-chan error, error) {
 	switch request {
 	case RequestReload:
-		return sup.ReloadRequested{}, nil
+		return sup.ReloadRequested{}, nil, nil
 	case RequestBuild:
-		return sup.BuildOnlyRequested{}, nil
-	case RequestStop, RequestStart, RequestStatus, RequestQuit:
-		return sup.ControlEvent{Command: string(request)}, nil
+		return sup.BuildOnlyRequested{}, nil, nil
+	case RequestStop:
+		reply := make(chan error, 1)
+		return sup.StopRequested{Reply: reply}, reply, nil
+	case RequestStart:
+		reply := make(chan error, 1)
+		return sup.StartRequested{Reply: reply}, reply, nil
+	case RequestStatus, RequestQuit:
+		return sup.ControlEvent{Command: string(request)}, nil, nil
 	default:
-		return nil, fmt.Errorf("unsupported control request %q", request)
+		return nil, nil, fmt.Errorf("unsupported control request %q", request)
 	}
 }
