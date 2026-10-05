@@ -60,7 +60,14 @@ func TestStopForceKillsProcessGroup(t *testing.T) {
 	output := make(chan string, 1)
 	process := startLinuxTestproc(t, binary, "ignore-term", output)
 	select {
-	case <-output:
+	case line := <-output:
+		pid, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "[] ")))
+		if err != nil {
+			t.Fatalf("parse helper pid from %q: %v", line, err)
+		}
+		if pid != process.Pid() {
+			t.Fatalf("helper pid = %d, want process-group leader pid %d", pid, process.Pid())
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for process to ignore SIGTERM")
 	}
@@ -112,7 +119,7 @@ func startLinuxTestproc(t *testing.T, binary, mode string, output chan string) *
 		writer = linuxTestWriter(output)
 	}
 	process, err := Start(context.Background(), Spec{
-		Cmd:    fmt.Sprintf("%s %s", processOutputCommand(binary), mode),
+		Cmd:    fmt.Sprintf("exec %s %s", processOutputCommand(binary), mode),
 		Output: writer,
 	})
 	if err != nil {
