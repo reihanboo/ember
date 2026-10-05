@@ -2,6 +2,7 @@ package sup
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,6 +17,10 @@ import (
 type recordingLogger chan string
 
 func (logger recordingLogger) Debug(message string) {
+	logger <- message
+}
+
+func (logger recordingLogger) Error(message string) {
 	logger <- message
 }
 
@@ -195,6 +200,94 @@ func (fakeProcess) Wait() proc.ExitResult {
 func (process fakeProcess) Stop(_ context.Context, timeout time.Duration) error {
 	process.order <- fmt.Sprintf("stop:%d:%s", process.pid, timeout)
 	return nil
+}
+
+type controlledBuilder struct {
+	calls   chan build.Spec
+	results chan build.Result
+}
+
+func (builder controlledBuilder) Build(ctx context.Context, spec build.Spec) build.Result {
+	builder.calls <- spec
+	select {
+	case result := <-builder.results:
+		return result
+	case <-ctx.Done():
+		return build.Result{Cancelled: true, Err: ctx.Err()}
+	}
+}
+
+func TestFailedBuildKeepsRunningAppUntilNextSuccess(t *testing.T) {
+	useSupervisorWorkingDirectory(t)
+	builder := controlledBuilder{
+		calls:   make(chan build.Spec, 3),
+		results: make(chan build.Result, 3),
+	}
+	order := make(chan string, 8)
+	runner := &fakeRunner{calls: make(chan proc.Spec, 3), order: order, nextPID: 200}
+	logger := make(recordingLogger, 4)
+	supervisor := NewSupervisor(
+		builder,
+		runner,
+		build.Spec{Cmd: "cc -o {out}"},
+		proc.Spec{Cmd: "{out}"},
+		2*time.Second,
+		fakeClock{},
+		logger,
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runResult := make(chan error, 1)
+	go func() {
+		runResult <- supervisor.Run(ctx)
+	}()
+
+	supervisor.Send(FileChanged{Paths: []string{"main.c"}})
+	readBuildCall(t, builder.calls)
+	builder.results <- build.Result{Success: true}
+	if got := readOrder(t, order); got != "start:200" {
+		t.Fatalf("first app event = %q, want start:200", got)
+	}
+	readRunCall(t, runner.calls)
+	waitForSupervisorState(t, supervisor, Running)
+
+	supervisor.Send(ReloadRequested{})
+	readBuildCall(t, builder.calls)
+	builder.results <- build.Result{ExitCode: 1, Err: errors.New("compiler rejected source")}
+	if message := readSupervisorLog(t, logger); !strings.Contains(message, "compiler rejected source") {
+		t.Errorf("build failure log = %q, want error summary", message)
+	}
+	if snapshot := supervisor.Snapshot(); snapshot.State != BuildFailed || snapshot.PID != 200 || snapshot.LastBuildOK {
+		t.Errorf("snapshot after failed build = %#v, want failed state with old process still running", snapshot)
+	}
+	select {
+	case event := <-order:
+		t.Errorf("failed build affected the old process: %q", event)
+	default:
+	}
+	select {
+	case <-runner.calls:
+		t.Error("runner started a process after failed build")
+	default:
+	}
+
+	supervisor.Send(ReloadRequested{})
+	readBuildCall(t, builder.calls)
+	builder.results <- build.Result{Success: true}
+	if got := readOrder(t, order); got != "stop:200:2s" {
+		t.Fatalf("recovery stop event = %q, want old app stopped first", got)
+	}
+	if got := readOrder(t, order); got != "start:201" {
+		t.Fatalf("recovery start event = %q, want new app started after stop", got)
+	}
+	readRunCall(t, runner.calls)
+	waitForSupervisorState(t, supervisor, Running)
+	if snapshot := supervisor.Snapshot(); snapshot.PID != 201 || !snapshot.LastBuildOK {
+		t.Errorf("snapshot after recovery = %#v, want new app running", snapshot)
+	}
+
+	cancel()
+	awaitSupervisorRun(t, runResult)
 }
 
 func TestSuccessfulBuildRestartsAppAndPrunesOutputs(t *testing.T) {

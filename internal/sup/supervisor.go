@@ -34,6 +34,7 @@ type Clock interface {
 
 type Logger interface {
 	Debug(string)
+	Error(string)
 }
 
 type Supervisor struct {
@@ -182,7 +183,11 @@ func (s *Supervisor) finishBuild(ctx context.Context, result build.Result) {
 	}
 	if !result.Success {
 		s.setState(BuildFailed)
-		s.logger.Debug(fmt.Sprintf("build failed: %v", result.Err))
+		failure := result.Err
+		if failure == nil {
+			failure = fmt.Errorf("exit code %d", result.ExitCode)
+		}
+		s.logger.Error(fmt.Sprintf("build failed: %v", failure))
 		return
 	}
 	s.restartApp(ctx)
