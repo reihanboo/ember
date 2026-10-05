@@ -16,17 +16,22 @@ import (
 
 const clientRequestTimeout = 5 * time.Second
 
+var ErrNoInstance = errors.New("no running instance found")
+
 func SendRequest(ctx context.Context, controlFile string, request Request) ([]string, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	contents, err := os.ReadFile(controlFile)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("%w: control port file %q does not exist", ErrNoInstance, controlFile)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("read control port file %q: %w", controlFile, err)
 	}
 	port, err := strconv.Atoi(strings.TrimSpace(string(contents)))
 	if err != nil || port < 1 || port > 65535 {
-		return nil, fmt.Errorf("control port file %q contains an invalid port", controlFile)
+		return nil, fmt.Errorf("%w: control port file %q contains an invalid port", ErrNoInstance, controlFile)
 	}
 	encodedRequest, err := EncodeRequest(request)
 	if err != nil {
@@ -35,7 +40,10 @@ func SendRequest(ctx context.Context, controlFile string, request Request) ([]st
 	dialer := net.Dialer{Timeout: serverProbeTimeout}
 	connection, err := dialer.DialContext(ctx, "tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
 	if err != nil {
-		return nil, fmt.Errorf("connect to control server: %w", err)
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("connect to control server: %w", err)
+		}
+		return nil, fmt.Errorf("%w: connect to control server: %w", ErrNoInstance, err)
 	}
 	defer connection.Close()
 	stopCancellation := context.AfterFunc(ctx, func() {

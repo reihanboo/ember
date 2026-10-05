@@ -157,6 +157,152 @@ func TestStatusCommandPrintsHumanReadableSnapshot(t *testing.T) {
 	}
 }
 
+func TestControlCommandsSendRequestsToLiveServer(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "ember.toml"), []byte("[ui]\ncolor = false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	nested := filepath.Join(root, "src", "nested")
+	if err := os.MkdirAll(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	previousDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(nested); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(previousDirectory); err != nil {
+			t.Error(err)
+		}
+	})
+
+	requests := make(chan ctl.Request, 5)
+	server, err := ctl.StartServer(filepath.Join(root, ".ember", "ctl"), func(request ctl.Request) []string {
+		requests <- request
+		if request == ctl.RequestStatus {
+			return []string{
+				"state=Running",
+				"pid=321",
+				"last_build_ok=true",
+				"last_build_ms=8",
+				"last_change=2026-07-08T09:10:11Z",
+			}
+		}
+		return []string{"ok"}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := server.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+
+	for _, request := range []ctl.Request{ctl.RequestReload, ctl.RequestBuild, ctl.RequestStop, ctl.RequestStart, ctl.RequestStatus} {
+		var stdout, stderr bytes.Buffer
+		status := RunContext(context.Background(), nil, []string{string(request)}, &stdout, &stderr)
+		if status != 0 {
+			t.Fatalf("RunContext(%q) = %d, stderr %q", request, status, stderr.String())
+		}
+		select {
+		case got := <-requests:
+			if got != request {
+				t.Errorf("server request = %q, want %q", got, request)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("server did not receive %q", request)
+		}
+		if request == ctl.RequestStatus {
+			want := "State: Running\nPID: 321\nLast build OK: true\nLast build duration: 8 ms\nLast change: 2026-07-08T09:10:11Z\n"
+			if stdout.String() != want {
+				t.Errorf("status output = %q, want %q", stdout.String(), want)
+			}
+		} else if stdout.String() != "ok\n" {
+			t.Errorf("%s output = %q, want ok response", request, stdout.String())
+		}
+		if stderr.Len() != 0 {
+			t.Errorf("%s stderr = %q, want empty", request, stderr.String())
+		}
+	}
+}
+
+func TestControlCommandsReturnTwoWithoutInstance(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "ember.toml"), []byte("[ui]\ncolor = false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	nested := filepath.Join(root, "src")
+	if err := os.MkdirAll(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	previousDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(nested); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(previousDirectory); err != nil {
+			t.Error(err)
+		}
+	})
+
+	for _, command := range []string{"reload", "build", "stop", "start", "status"} {
+		var stdout, stderr bytes.Buffer
+		status := RunContext(context.Background(), nil, []string{command}, &stdout, &stderr)
+		if status != 2 {
+			t.Errorf("RunContext(%q) = %d, want 2 (stderr %q)", command, status, stderr.String())
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("RunContext(%q) stdout = %q, want empty", command, stdout.String())
+		}
+		if got := stderr.String(); got != "no running instance found; run `ember run`\n" {
+			t.Errorf("RunContext(%q) stderr = %q, want no-instance hint", command, got)
+		}
+	}
+}
+
+func TestControlCommandReturnsOneOnServerError(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "ember.toml"), []byte("[ui]\ncolor = false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(previousDirectory); err != nil {
+			t.Error(err)
+		}
+	})
+	server, err := ctl.StartServer(filepath.Join(root, ".ember", "ctl"), func(ctl.Request) []string {
+		return []string{"error: app is not built"}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := server.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+
+	var stdout, stderr bytes.Buffer
+	status := RunContext(context.Background(), nil, []string{"start"}, &stdout, &stderr)
+	if status != 1 || stderr.String() != "app is not built\n" {
+		t.Errorf("start command = (%d, %q), want (1, server error)", status, stderr.String())
+	}
+}
+
 func TestRun(t *testing.T) {
 	usage := "Usage: ember <command>\n\nCommands:\n  run\n  reload\n  build\n  stop\n  start\n  status\n  init\n"
 	tests := []struct {
@@ -166,12 +312,6 @@ func TestRun(t *testing.T) {
 		wantStdout string
 		wantStderr string
 	}{
-
-		{name: "reload", args: []string{"reload"}, wantStatus: 1, wantStderr: "not implemented\n"},
-		{name: "build", args: []string{"build"}, wantStatus: 1, wantStderr: "not implemented\n"},
-		{name: "stop", args: []string{"stop"}, wantStatus: 1, wantStderr: "not implemented\n"},
-		{name: "start", args: []string{"start"}, wantStatus: 1, wantStderr: "not implemented\n"},
-
 		{name: "unknown", args: []string{"unknown"}, wantStatus: 1, wantStderr: usage},
 		{name: "missing", wantStatus: 1, wantStderr: usage},
 		{name: "help", args: []string{"-h"}, wantStdout: usage},

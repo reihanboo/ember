@@ -62,6 +62,10 @@ func RunContext(ctx context.Context, registry *proc.Registry, args []string, std
 	for _, item := range commands {
 		if args[0] == item.name {
 			if err := item.handler(ctx, registry, stdout, stderr); err != nil {
+				if errors.Is(err, ctl.ErrNoInstance) {
+					fmt.Fprintln(stderr, "no running instance found; run `ember run`")
+					return 2
+				}
 				fmt.Fprintln(stderr, err)
 				return 1
 			}
@@ -229,23 +233,27 @@ func (process *registeredProcess) Stop(ctx context.Context, timeout time.Duratio
 	return process.process.Stop(ctx, timeout)
 }
 
-func reloadCommand(context.Context, *proc.Registry, io.Writer, io.Writer) error {
-	return errors.New("not implemented")
+func reloadCommand(ctx context.Context, _ *proc.Registry, stdout, _ io.Writer) error {
+	return runControlCommand(ctx, ctl.RequestReload, stdout)
 }
 
-func buildCommand(context.Context, *proc.Registry, io.Writer, io.Writer) error {
-	return errors.New("not implemented")
+func buildCommand(ctx context.Context, _ *proc.Registry, stdout, _ io.Writer) error {
+	return runControlCommand(ctx, ctl.RequestBuild, stdout)
 }
 
-func stopCommand(context.Context, *proc.Registry, io.Writer, io.Writer) error {
-	return errors.New("not implemented")
+func stopCommand(ctx context.Context, _ *proc.Registry, stdout, _ io.Writer) error {
+	return runControlCommand(ctx, ctl.RequestStop, stdout)
 }
 
-func startCommand(context.Context, *proc.Registry, io.Writer, io.Writer) error {
-	return errors.New("not implemented")
+func startCommand(ctx context.Context, _ *proc.Registry, stdout, _ io.Writer) error {
+	return runControlCommand(ctx, ctl.RequestStart, stdout)
 }
 
 func statusCommand(ctx context.Context, _ *proc.Registry, stdout, _ io.Writer) error {
+	return runControlCommand(ctx, ctl.RequestStatus, stdout)
+}
+
+func runControlCommand(ctx context.Context, request ctl.Request, stdout io.Writer) error {
 	workingDirectory, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("get working directory: %w", err)
@@ -254,17 +262,19 @@ func statusCommand(ctx context.Context, _ *proc.Registry, stdout, _ io.Writer) e
 	if err != nil {
 		return err
 	}
-	lines, err := ctl.SendRequest(ctx, filepath.Join(root, ".ember", "ctl"), ctl.RequestStatus)
+	lines, err := ctl.SendRequest(ctx, filepath.Join(root, ".ember", "ctl"), request)
 	if err != nil {
 		return err
 	}
-	status, err := renderStatus(lines)
-	if err != nil {
-		return fmt.Errorf("render control status: %w", err)
+	if request == ctl.RequestStatus {
+		lines, err = renderStatus(lines)
+		if err != nil {
+			return fmt.Errorf("render control status: %w", err)
+		}
 	}
-	for _, line := range status {
+	for _, line := range lines {
 		if _, err := fmt.Fprintln(stdout, line); err != nil {
-			return fmt.Errorf("write status: %w", err)
+			return fmt.Errorf("write control response: %w", err)
 		}
 	}
 	return nil
