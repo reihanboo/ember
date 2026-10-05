@@ -30,6 +30,7 @@ type Process struct {
 	waitOnce  sync.Once
 	jobMu     sync.Mutex
 	jobHandle uintptr
+	jobHeld   bool
 	result    ExitResult
 }
 
@@ -88,6 +89,20 @@ func (p *Process) Wait() ExitResult {
 func (p *Process) closeJob() error {
 	p.jobMu.Lock()
 	defer p.jobMu.Unlock()
+	if p.jobHeld || p.jobHandle == 0 {
+		return nil
+	}
+	if err := closeProcessJob(p.jobHandle); err != nil {
+		return err
+	}
+	p.jobHandle = 0
+	return nil
+}
+
+func (p *Process) releaseJob() error {
+	p.jobMu.Lock()
+	defer p.jobMu.Unlock()
+	p.jobHeld = false
 	if p.jobHandle == 0 {
 		return nil
 	}

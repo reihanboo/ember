@@ -52,19 +52,87 @@ func closeProcessJob(job uintptr) error {
 	return windows.CloseHandle(windows.Handle(job))
 }
 
-func (p *Process) Stop(_, _ time.Duration) error {
+func (p *Process) Stop(grace, timeout time.Duration) error {
 	p.jobMu.Lock()
 	job := p.jobHandle
-	var err error
-	if job != 0 {
-		err = windows.TerminateJobObject(windows.Handle(job), 1)
+	if job == 0 {
+		p.jobMu.Unlock()
+		p.Wait()
+		return nil
 	}
+	p.jobHeld = true
 	p.jobMu.Unlock()
-	if err != nil {
-		return fmt.Errorf("terminate process job: %w", err)
+
+	processDone := make(chan struct{})
+	go func() {
+		p.Wait()
+		close(processDone)
+	}()
+
+	breakErr := windows.GenerateConsoleCtrlEvent(windows.CTRL_BREAK_EVENT, uint32(p.Pid()))
+	if breakErr == nil {
+		stopped, err := waitForJobAndProcess(job, processDone, grace)
+		if err == nil && stopped {
+			return p.releaseJob()
+		}
 	}
-	p.Wait()
-	return nil
+
+	if err := windows.TerminateJobObject(windows.Handle(job), 1); err != nil {
+		closeErr := p.releaseJob()
+		return errors.Join(fmt.Errorf("terminate process job: %w", err), closeErr)
+	}
+	stopped, waitErr := waitForJobAndProcess(job, processDone, timeout)
+	closeErr := p.releaseJob()
+	if waitErr != nil {
+		return errors.Join(fmt.Errorf("wait for process job: %w", waitErr), closeErr)
+	}
+	if !stopped {
+		return errors.Join(fmt.Errorf("process %d did not stop within %s after job termination", p.Pid(), timeout), closeErr)
+	}
+	return closeErr
+}
+
+type windowsJobAccounting struct {
+	totalUserTime            int64
+	totalKernelTime          int64
+	periodTotalUserTime      int64
+	periodTotalKernelTime    int64
+	totalPageFaultCount      uint32
+	totalProcesses           uint32
+	activeProcesses          uint32
+	totalTerminatedProcesses uint32
+}
+
+func waitForJobAndProcess(job uintptr, processDone <-chan struct{}, timeout time.Duration) (bool, error) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	done := processDone
+
+	for {
+		var accounting windowsJobAccounting
+		if err := windows.QueryInformationJobObject(
+			windows.Handle(job),
+			windows.JobObjectBasicAccountingInformation,
+			uintptr(unsafe.Pointer(&accounting)),
+			uint32(unsafe.Sizeof(accounting)),
+			nil,
+		); err != nil {
+			return false, fmt.Errorf("query job object process count: %w", err)
+		}
+		if accounting.activeProcesses == 0 && done == nil {
+			return true, nil
+		}
+
+		select {
+		case <-done:
+			done = nil
+		case <-ticker.C:
+		case <-timer.C:
+			return false, nil
+		}
+	}
 }
 
 func processSignal(*os.ProcessState) os.Signal {

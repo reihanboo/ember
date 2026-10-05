@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strconv"
 	"time"
 )
@@ -29,8 +30,9 @@ func main() {
 	case "spawn-child-sleep":
 		spawnChildSleep()
 	case "ignore-term":
-		fmt.Println(os.Getpid())
 		ignoreTerm()
+	case "handle-break":
+		handleBreak()
 	default:
 		fail("unknown mode: " + os.Args[1])
 	}
@@ -55,6 +57,14 @@ func sleepForever() {
 	for {
 		time.Sleep(time.Hour)
 	}
+}
+
+func handleBreak() {
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt)
+	fmt.Println(os.Getpid())
+	<-signals
+	os.Exit(23)
 }
 
 func fail(message string) {

@@ -44,6 +44,55 @@ func TestStartReportsNonexistentCommand(t *testing.T) {
 	}
 }
 
+func TestStopAllowsCtrlBreakHandlerToExit(t *testing.T) {
+	binary := buildTestproc(t)
+	output := make(chan string, 4)
+	process := startWindowsTestproc(t, binary, "handle-break", output)
+	if pid := readWindowsTestprocPID(t, output); pid <= 0 {
+		t.Fatalf("helper pid = %d, want a positive pid", pid)
+	}
+	if err := process.Stop(3*time.Second, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if result := process.Wait(); result.Code != 23 {
+		t.Errorf("exit result = %#v, want helper exit code 23", result)
+	}
+}
+
+func TestStopForceKillsIgnoringCtrlBreak(t *testing.T) {
+	binary := buildTestproc(t)
+	output := make(chan string, 4)
+	process := startWindowsTestproc(t, binary, "ignore-term", output)
+	pid := readWindowsTestprocPID(t, output)
+	if pid <= 0 {
+		t.Fatalf("helper pid = %d, want a positive pid", pid)
+	}
+	processHandle, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(pid))
+	if err != nil {
+		t.Fatalf("open helper process %d: %v", pid, err)
+	}
+	defer windows.CloseHandle(processHandle)
+
+	grace := 300 * time.Millisecond
+	started := time.Now()
+	if err := process.Stop(grace, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed < grace {
+		t.Errorf("Stop returned after %s, want it to wait at least %s", elapsed, grace)
+	}
+	if result := process.Wait(); result.Code == 0 {
+		t.Errorf("exit result = %#v, want a force-terminated process", result)
+	}
+	waitResult, err := windows.WaitForSingleObject(processHandle, 5000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if waitResult != windows.WAIT_OBJECT_0 {
+		t.Errorf("helper process wait result = %d, want %d", waitResult, windows.WAIT_OBJECT_0)
+	}
+}
+
 func TestStopTerminatesSleepingProcess(t *testing.T) {
 	binary := buildTestproc(t)
 	process := startWindowsTestproc(t, binary, "sleep", nil)
@@ -95,6 +144,21 @@ func (writer windowsTestWriter) Write(data []byte) (int, error) {
 	line := string(data)
 	writer <- line
 	return len(data), nil
+}
+
+func readWindowsTestprocPID(t *testing.T, output <-chan string) int {
+	t.Helper()
+	select {
+	case line := <-output:
+		pid, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "[] ")))
+		if err != nil {
+			t.Fatalf("parse helper pid from %q: %v", line, err)
+		}
+		return pid
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for helper pid")
+		return 0
+	}
 }
 
 func startWindowsTestproc(t *testing.T, binary, mode string, output chan string) *Process {
