@@ -22,3 +22,4 @@ The Windows example uses `cl`, so start it from a Developer PowerShell with the 
 - [Compiler recipes](docs/compiler-recipes.md): cl, clang-cl, clang, GCC, and Zig
 - [Build-system recipes](docs/build-systems.md): CMake with Ninja and Make
 - [Platform notes](docs/platform-notes.md): locked executables and WSL
+- [Zed](docs/editors/zed.md): reload the running project from a task or key binding
