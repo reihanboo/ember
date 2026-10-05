@@ -74,7 +74,7 @@ func TestStopKillsGrandchild(t *testing.T) {
 	var childPID int
 	select {
 	case line := <-output:
-		pid, err := strconv.Atoi(strings.TrimSpace(line))
+		pid, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "[] ")))
 		if err != nil {
 			t.Fatalf("parse grandchild pid from %q: %v", line, err)
 		}

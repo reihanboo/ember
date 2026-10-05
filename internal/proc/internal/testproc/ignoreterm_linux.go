@@ -7,5 +7,5 @@ import (
 
 func ignoreTerm() {
 	signal.Ignore(syscall.SIGTERM)
-	select {}
+	sleepForever()
 }

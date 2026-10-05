@@ -8,6 +8,18 @@ import (
 	"time"
 )
 
+func createProcessJob() (uintptr, error) {
+	return 0, nil
+}
+
+func assignProcessToJob(uintptr, int) error {
+	return nil
+}
+
+func closeProcessJob(uintptr) error {
+	return nil
+}
+
 func processSignal(state *os.ProcessState) os.Signal {
 	status, ok := state.Sys().(syscall.WaitStatus)
 	if !ok || !status.Signaled() {

@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"time"
 )
 
 func main() {
@@ -24,7 +25,7 @@ func main() {
 		os.Exit(code)
 	case "sleep":
 		fmt.Println(os.Getpid())
-		select {}
+		sleepForever()
 	case "spawn-child-sleep":
 		spawnChildSleep()
 	case "ignore-term":
@@ -47,7 +48,13 @@ func spawnChildSleep() {
 		fail(err.Error())
 	}
 	go child.Wait()
-	select {}
+	sleepForever()
+}
+
+func sleepForever() {
+	for {
+		time.Sleep(time.Hour)
+	}
 }
 
 func fail(message string) {

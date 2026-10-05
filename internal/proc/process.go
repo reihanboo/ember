@@ -25,10 +25,12 @@ type ExitResult struct {
 }
 
 type Process struct {
-	command  *exec.Cmd
-	outputs  []*lineWriter
-	waitOnce sync.Once
-	result   ExitResult
+	command   *exec.Cmd
+	outputs   []*lineWriter
+	waitOnce  sync.Once
+	jobMu     sync.Mutex
+	jobHandle uintptr
+	result    ExitResult
 }
 
 func Start(ctx context.Context, spec Spec) (*Process, error) {
@@ -42,10 +44,21 @@ func Start(ctx context.Context, spec Spec) (*Process, error) {
 	command := commandWithContext(ctx, spec.Cmd, spec.Cwd, spec.Env)
 	command.Stdout = stdout
 	command.Stderr = stderr
-	if err := command.Start(); err != nil {
-		return nil, fmt.Errorf("start command %q: %w", spec.Cmd, err)
+	jobHandle, err := createProcessJob()
+	if err != nil {
+		return nil, fmt.Errorf("create process job: %w", err)
 	}
-	return &Process{command: command, outputs: []*lineWriter{stdout, stderr}}, nil
+	if err := command.Start(); err != nil {
+		closeErr := closeProcessJob(jobHandle)
+		return nil, errors.Join(fmt.Errorf("start command %q: %w", spec.Cmd, err), closeErr)
+	}
+	if err := assignProcessToJob(jobHandle, command.Process.Pid); err != nil {
+		command.Process.Kill()
+		command.Wait()
+		closeProcessJob(jobHandle)
+		return nil, fmt.Errorf("assign process %d to job: %w", command.Process.Pid, err)
+	}
+	return &Process{command: command, outputs: []*lineWriter{stdout, stderr}, jobHandle: jobHandle}, nil
 }
 
 func (p *Process) Wait() ExitResult {
@@ -60,6 +73,9 @@ func (p *Process) Wait() ExitResult {
 				err = errors.Join(err, fmt.Errorf("flush %s: %w", stream, flushErr))
 			}
 		}
+		if closeErr := p.closeJob(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close process job: %w", closeErr))
+		}
 		p.result = ExitResult{Code: -1, Err: err}
 		if state := p.command.ProcessState; state != nil {
 			p.result.Code = state.ExitCode()
@@ -67,6 +83,19 @@ func (p *Process) Wait() ExitResult {
 		}
 	})
 	return p.result
+}
+
+func (p *Process) closeJob() error {
+	p.jobMu.Lock()
+	defer p.jobMu.Unlock()
+	if p.jobHandle == 0 {
+		return nil
+	}
+	if err := closeProcessJob(p.jobHandle); err != nil {
+		return err
+	}
+	p.jobHandle = 0
+	return nil
 }
 
 func (p *Process) Pid() int {
