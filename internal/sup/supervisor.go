@@ -147,6 +147,24 @@ func (s *Supervisor) handle(ctx context.Context, event Event) {
 			return
 		}
 		s.startBuild(ctx)
+	case ChildExited:
+		exited := event.(ChildExited)
+		currentPID := 0
+		if s.process != nil {
+			currentPID = s.process.Pid()
+		}
+		if currentPID == 0 || exited.PID != currentPID {
+			s.logger.Debug(fmt.Sprintf("ignored stale child exit for pid %d; current pid is %d", exited.PID, currentPID))
+			return
+		}
+		s.process = nil
+		s.snapshotM.Lock()
+		s.snapshot.PID = 0
+		if s.snapshot.State != Building {
+			s.snapshot.State = Idle
+		}
+		s.snapshotM.Unlock()
+		s.logger.Debug(fmt.Sprintf("app process %d exited with code %d", exited.PID, exited.Result.Code))
 	case BuildFinishedEvent:
 		finished := event.(BuildFinishedEvent)
 		if finished.BuildID != s.buildID {
@@ -254,12 +272,17 @@ func (s *Supervisor) restartApp(ctx context.Context) {
 		return
 	}
 
+	pid := process.Pid()
 	s.process = process
 	s.currentOutput = s.buildOutput
 	s.snapshotM.Lock()
 	s.snapshot.State = Running
-	s.snapshot.PID = process.Pid()
+	s.snapshot.PID = pid
 	s.snapshotM.Unlock()
+	go func() {
+		result := process.Wait()
+		s.Send(ChildExited{PID: pid, Result: result})
+	}()
 
 	keep := []string{s.currentOutput}
 	if previousOutput != "" && previousOutput != s.currentOutput {

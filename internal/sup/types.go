@@ -28,10 +28,12 @@ type KeyEvent struct {
 	Key rune
 }
 
-type ChildExitEvent struct {
+type ChildExited struct {
 	PID    int
 	Result proc.ExitResult
 }
+
+type ChildExitEvent = ChildExited
 
 type BuildFinishedEvent struct {
 	BuildID uint64
@@ -42,7 +44,7 @@ func (FileChanged) isEvent()        {}
 func (ReloadRequested) isEvent()    {}
 func (ControlEvent) isEvent()       {}
 func (KeyEvent) isEvent()           {}
-func (ChildExitEvent) isEvent()     {}
+func (ChildExited) isEvent()        {}
 func (BuildFinishedEvent) isEvent() {}
 
 type State uint8

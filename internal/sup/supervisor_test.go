@@ -172,35 +172,54 @@ func (builder successfulBuilder) Build(_ context.Context, spec build.Spec) build
 }
 
 type fakeRunner struct {
-	calls   chan proc.Spec
-	order   chan string
-	nextPID int
+	calls     chan proc.Spec
+	processes chan *fakeProcess
+	order     chan string
+	nextPID   int
 }
 
 func (runner *fakeRunner) Start(_ context.Context, spec proc.Spec) (Process, error) {
 	pid := runner.nextPID
 	runner.nextPID++
+	process := &fakeProcess{
+		pid:   pid,
+		order: runner.order,
+		done:  make(chan struct{}),
+	}
 	runner.calls <- spec
 	runner.order <- fmt.Sprintf("start:%d", pid)
-	return fakeProcess{pid: pid, order: runner.order}, nil
+	runner.processes <- process
+	return process, nil
 }
 
 type fakeProcess struct {
-	pid   int
-	order chan string
+	pid        int
+	order      chan string
+	done       chan struct{}
+	finish     sync.Once
+	exitResult proc.ExitResult
 }
 
-func (process fakeProcess) Pid() int {
+func (process *fakeProcess) Pid() int {
 	return process.pid
 }
 
-func (fakeProcess) Wait() proc.ExitResult {
-	return proc.ExitResult{}
+func (process *fakeProcess) Wait() proc.ExitResult {
+	<-process.done
+	return process.exitResult
 }
 
-func (process fakeProcess) Stop(_ context.Context, timeout time.Duration) error {
+func (process *fakeProcess) Stop(_ context.Context, timeout time.Duration) error {
 	process.order <- fmt.Sprintf("stop:%d:%s", process.pid, timeout)
+	process.exit(proc.ExitResult{Code: 1})
 	return nil
+}
+
+func (process *fakeProcess) exit(result proc.ExitResult) {
+	process.finish.Do(func() {
+		process.exitResult = result
+		close(process.done)
+	})
 }
 
 type controlledBuilder struct {
@@ -257,7 +276,7 @@ func TestNewTriggerSupersedesBuildingBuild(t *testing.T) {
 		firstCanceled: make(chan struct{}),
 		results:       make(chan build.Result, 1),
 	}
-	runner := &fakeRunner{calls: make(chan proc.Spec, 2), order: order, nextPID: 300}
+	runner := &fakeRunner{calls: make(chan proc.Spec, 2), processes: make(chan *fakeProcess, 2), order: order, nextPID: 300}
 	logger := make(recordingLogger, 4)
 	supervisor := NewSupervisor(
 		builder,
@@ -307,6 +326,7 @@ func TestNewTriggerSupersedesBuildingBuild(t *testing.T) {
 	if snapshot := supervisor.Snapshot(); snapshot.PID != 300 || !snapshot.LastBuildOK {
 		t.Errorf("snapshot after superseding build = %#v, want one successful app start", snapshot)
 	}
+	process := readFakeProcess(t, runner.processes)
 	select {
 	case event := <-order:
 		t.Errorf("unexpected extra app operation %q", event)
@@ -320,6 +340,7 @@ func TestNewTriggerSupersedesBuildingBuild(t *testing.T) {
 
 	cancel()
 	awaitSupervisorRun(t, runResult)
+	process.exit(proc.ExitResult{Code: 0})
 }
 
 func TestFailedBuildKeepsRunningAppUntilNextSuccess(t *testing.T) {
@@ -329,7 +350,7 @@ func TestFailedBuildKeepsRunningAppUntilNextSuccess(t *testing.T) {
 		results: make(chan build.Result, 3),
 	}
 	order := make(chan string, 8)
-	runner := &fakeRunner{calls: make(chan proc.Spec, 3), order: order, nextPID: 200}
+	runner := &fakeRunner{calls: make(chan proc.Spec, 3), processes: make(chan *fakeProcess, 3), order: order, nextPID: 200}
 	logger := make(recordingLogger, 4)
 	supervisor := NewSupervisor(
 		builder,
@@ -354,6 +375,7 @@ func TestFailedBuildKeepsRunningAppUntilNextSuccess(t *testing.T) {
 		t.Fatalf("first app event = %q, want start:200", got)
 	}
 	readRunCall(t, runner.calls)
+	oldProcess := readFakeProcess(t, runner.processes)
 	waitForSupervisorState(t, supervisor, Running)
 
 	supervisor.Send(ReloadRequested{})
@@ -386,6 +408,7 @@ func TestFailedBuildKeepsRunningAppUntilNextSuccess(t *testing.T) {
 		t.Fatalf("recovery start event = %q, want new app started after stop", got)
 	}
 	readRunCall(t, runner.calls)
+	newProcess := readFakeProcess(t, runner.processes)
 	waitForSupervisorState(t, supervisor, Running)
 	if snapshot := supervisor.Snapshot(); snapshot.PID != 201 || !snapshot.LastBuildOK {
 		t.Errorf("snapshot after recovery = %#v, want new app running", snapshot)
@@ -393,6 +416,8 @@ func TestFailedBuildKeepsRunningAppUntilNextSuccess(t *testing.T) {
 
 	cancel()
 	awaitSupervisorRun(t, runResult)
+	oldProcess.exit(proc.ExitResult{Code: 1})
+	newProcess.exit(proc.ExitResult{Code: 0})
 }
 
 func TestSuccessfulBuildRestartsAppAndPrunesOutputs(t *testing.T) {
@@ -403,7 +428,7 @@ func TestSuccessfulBuildRestartsAppAndPrunesOutputs(t *testing.T) {
 
 	order := make(chan string, 8)
 	builder := successfulBuilder{calls: make(chan build.Spec, 2), order: order}
-	runner := &fakeRunner{calls: make(chan proc.Spec, 2), order: order, nextPID: 100}
+	runner := &fakeRunner{calls: make(chan proc.Spec, 2), processes: make(chan *fakeProcess, 2), order: order, nextPID: 100}
 	logger := make(recordingLogger, 4)
 	supervisor := NewSupervisor(
 		builder,
@@ -430,6 +455,7 @@ func TestSuccessfulBuildRestartsAppAndPrunesOutputs(t *testing.T) {
 		t.Fatalf("first runner event = %q, want start:100 without stopping", got)
 	}
 	firstRun := readRunCall(t, runner.calls)
+	firstProcess := readFakeProcess(t, runner.processes)
 	firstOutput := strings.TrimPrefix(firstBuild.Cmd, "cc -o ")
 	if firstRun.Cmd != firstOutput+" --flag" {
 		t.Errorf("first run command = %q, want %q", firstRun.Cmd, firstOutput+" --flag")
@@ -460,9 +486,13 @@ func TestSuccessfulBuildRestartsAppAndPrunesOutputs(t *testing.T) {
 		t.Fatalf("new process event = %q, want start after stop", got)
 	}
 	secondRun := readRunCall(t, runner.calls)
+	secondProcess := readFakeProcess(t, runner.processes)
 	secondOutput := strings.TrimPrefix(secondBuild.Cmd, "cc -o ")
 	if secondRun.Cmd != secondOutput+" --flag" {
 		t.Errorf("second run command = %q, want %q", secondRun.Cmd, secondOutput+" --flag")
+	}
+	if message := readSupervisorLog(t, logger); !strings.Contains(message, "stale child exit") {
+		t.Errorf("replaced process exit log = %q, want stale exit ignored", message)
 	}
 	waitForSupervisorState(t, supervisor, Running)
 	if snapshot := supervisor.Snapshot(); snapshot.PID != 101 || !snapshot.LastBuildOK {
@@ -479,6 +509,84 @@ func TestSuccessfulBuildRestartsAppAndPrunesOutputs(t *testing.T) {
 
 	cancel()
 	awaitSupervisorRun(t, runResult)
+	firstProcess.exit(proc.ExitResult{Code: 1})
+	secondProcess.exit(proc.ExitResult{Code: 0})
+}
+
+func TestChildExitWaitsForNextChangeToRestart(t *testing.T) {
+	useSupervisorWorkingDirectory(t)
+	if err := os.MkdirAll(filepath.Join(".ember", "bin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	order := make(chan string, 8)
+	builder := successfulBuilder{calls: make(chan build.Spec, 2), order: order}
+	runner := &fakeRunner{calls: make(chan proc.Spec, 2), processes: make(chan *fakeProcess, 2), order: order, nextPID: 400}
+	logger := make(recordingLogger, 4)
+	supervisor := NewSupervisor(
+		builder,
+		runner,
+		build.Spec{Cmd: "cc -o {out}"},
+		proc.Spec{Cmd: "{out}"},
+		2*time.Second,
+		fakeClock{},
+		logger,
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runResult := make(chan error, 1)
+	go func() {
+		runResult <- supervisor.Run(ctx)
+	}()
+
+	supervisor.Send(FileChanged{Paths: []string{"main.c"}})
+	readBuildCall(t, builder.calls)
+	if got := readOrder(t, order); got != "build-ok" {
+		t.Fatalf("first build event = %q, want build-ok", got)
+	}
+	if got := readOrder(t, order); got != "start:400" {
+		t.Fatalf("first runner event = %q, want start:400", got)
+	}
+	readRunCall(t, runner.calls)
+	process := readFakeProcess(t, runner.processes)
+	waitForSupervisorState(t, supervisor, Running)
+
+	process.exit(proc.ExitResult{Code: 7})
+	if message := readSupervisorLog(t, logger); !strings.Contains(message, "exited with code 7") {
+		t.Errorf("child exit log = %q, want exit code 7", message)
+	}
+	if snapshot := supervisor.Snapshot(); snapshot.State != Idle || snapshot.PID != 0 {
+		t.Errorf("snapshot after child exit = %#v, want Idle with no pid", snapshot)
+	}
+	select {
+	case event := <-order:
+		t.Errorf("app restarted without a change: %q", event)
+	default:
+	}
+	select {
+	case <-runner.calls:
+		t.Error("runner started an app without a change")
+	default:
+	}
+
+	supervisor.Send(FileChanged{Paths: []string{"main.c"}})
+	readBuildCall(t, builder.calls)
+	if got := readOrder(t, order); got != "build-ok" {
+		t.Fatalf("second build event = %q, want build-ok", got)
+	}
+	if got := readOrder(t, order); got != "start:401" {
+		t.Fatalf("second runner event = %q, want start:401 after next change", got)
+	}
+	readRunCall(t, runner.calls)
+	newProcess := readFakeProcess(t, runner.processes)
+	waitForSupervisorState(t, supervisor, Running)
+	if snapshot := supervisor.Snapshot(); snapshot.PID != 401 {
+		t.Errorf("snapshot after next change = %#v, want pid 401", snapshot)
+	}
+
+	cancel()
+	awaitSupervisorRun(t, runResult)
+	newProcess.exit(proc.ExitResult{Code: 0})
 }
 
 func useSupervisorWorkingDirectory(t *testing.T) {
@@ -517,6 +625,17 @@ func readBuildCall(t *testing.T, calls <-chan build.Spec) build.Spec {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for build call")
 		return build.Spec{}
+	}
+}
+
+func readFakeProcess(t *testing.T, processes <-chan *fakeProcess) *fakeProcess {
+	t.Helper()
+	select {
+	case process := <-processes:
+		return process
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for app process")
+		return nil
 	}
 }
 
