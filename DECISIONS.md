@@ -2,3 +2,4 @@ Config defaults leave build/run commands and environment empty; other defaults f
 Watcher errors emit a synthetic Change with nil Paths to request a full rebuild.
 Partial process output lines receive a newline when flushed after process exit.
 Stop timeout is the graceful period; cancellation skips grace, but forced cleanup waits for the tree.
+Linux abrupt-parent cleanup tests verify the direct child; grandchild cleanup depends on Registry shutdown.
