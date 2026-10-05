@@ -24,42 +24,52 @@ func RegisterDirectories(watcher DirectoryWatcher, root string, paths, ignore []
 	added := make(map[string]struct{})
 
 	for _, watchPath := range paths {
-		path := filepath.Join(absoluteRoot, filepath.FromSlash(watchPath))
-		info, err := os.Stat(path)
-		if errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("watch path %q does not exist: %w", watchPath, err)
-		}
-		if err != nil {
-			return fmt.Errorf("inspect watch path %q: %w", watchPath, err)
-		}
-		if !info.IsDir() {
-			return fmt.Errorf("watch path %q is not a directory", watchPath)
-		}
-
-		err = filepath.WalkDir(path, func(directory string, entry fs.DirEntry, walkErr error) error {
-			if walkErr != nil {
-				return fmt.Errorf("walk watch path %q: %w", watchPath, walkErr)
-			}
-			if !entry.IsDir() {
-				return nil
-			}
-			if ignoredDirectory(absoluteRoot, directory, ignore) {
-				return filepath.SkipDir
-			}
-
-			directory = filepath.Clean(directory)
-			if _, exists := added[directory]; exists {
-				return nil
-			}
-			if err := watcher.Add(directory); err != nil {
-				return fmt.Errorf("add watch directory %q: %w", directory, err)
-			}
-			added[directory] = struct{}{}
-			return nil
-		})
-		if err != nil {
+		if err := registerPath(watcher, absoluteRoot, watchPath, ignore, added, nil); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func registerPath(watcher DirectoryWatcher, root, watchPath string, ignore []string, added map[string]struct{}, onFile func(string)) error {
+	path := filepath.Join(root, filepath.FromSlash(watchPath))
+	info, err := os.Stat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("watch path %q does not exist: %w", watchPath, err)
+	}
+	if err != nil {
+		return fmt.Errorf("inspect watch path %q: %w", watchPath, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("watch path %q is not a directory", watchPath)
+	}
+
+	err = filepath.WalkDir(path, func(directory string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return fmt.Errorf("walk watch path %q: %w", watchPath, walkErr)
+		}
+		if !entry.IsDir() {
+			if onFile != nil {
+				onFile(directory)
+			}
+			return nil
+		}
+		if ignoredDirectory(root, directory, ignore) {
+			return filepath.SkipDir
+		}
+
+		directory = filepath.Clean(directory)
+		if _, exists := added[directory]; exists {
+			return nil
+		}
+		if err := watcher.Add(directory); err != nil {
+			return fmt.Errorf("add watch directory %q: %w", directory, err)
+		}
+		added[directory] = struct{}{}
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 	return nil
 }

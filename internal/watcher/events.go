@@ -2,7 +2,9 @@ package watcher
 
 import (
 	"context"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -41,6 +43,7 @@ func Watch(ctx context.Context, watcher *fsnotify.Watcher, filter *Filter, delay
 			emissionMu.Unlock()
 		}()
 
+		tracked := trackedDirectories(watcher)
 		watchErrors := watcher.Errors
 		for {
 			select {
@@ -54,10 +57,32 @@ func Watch(ctx context.Context, watcher *fsnotify.Watcher, filter *Filter, delay
 					continue
 				}
 				path, err := filepath.Abs(event.Name)
-				if err != nil || !filter.Allow(path) {
+				if err != nil {
 					continue
 				}
-				debouncer.Add(filepath.Clean(path))
+				path = filepath.Clean(path)
+				if event.Op&fsnotify.Create != 0 {
+					if info, err := os.Stat(path); err == nil && info.IsDir() {
+						if relative, insideRoot := relativeToRoot(filter.root, path); insideRoot {
+							watchPath := filepath.ToSlash(relative)
+							err := registerPath(watcher, filter.root, watchPath, filter.ignore, tracked, func(filePath string) {
+								filePath = filepath.Clean(filePath)
+								if filter.Allow(filePath) {
+									debouncer.Add(filePath)
+								}
+							})
+							if err == nil {
+								tracked = trackedDirectories(watcher)
+							}
+						}
+					}
+				}
+				if event.Op&(fsnotify.Rename|fsnotify.Remove) != 0 {
+					removeTrackedDirectories(watcher, tracked, path)
+				}
+				if filter.Allow(path) {
+					debouncer.Add(path)
+				}
 			case _, ok := <-watchErrors:
 				if !ok {
 					watchErrors = nil
@@ -67,4 +92,30 @@ func Watch(ctx context.Context, watcher *fsnotify.Watcher, filter *Filter, delay
 	}()
 
 	return changes
+}
+
+func trackedDirectories(watcher *fsnotify.Watcher) map[string]struct{} {
+	tracked := make(map[string]struct{})
+	for _, path := range watcher.WatchList() {
+		tracked[filepath.Clean(path)] = struct{}{}
+	}
+	return tracked
+}
+
+func relativeToRoot(root, path string) (string, bool) {
+	relative, err := filepath.Rel(root, path)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return relative, true
+}
+
+func removeTrackedDirectories(watcher *fsnotify.Watcher, tracked map[string]struct{}, directory string) {
+	for path := range tracked {
+		if _, isChild := relativeToRoot(directory, path); !isChild {
+			continue
+		}
+		watcher.Remove(path)
+		delete(tracked, path)
+	}
 }

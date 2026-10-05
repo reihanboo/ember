@@ -53,6 +53,60 @@ func TestWatchEmitsDebouncedFilteredChanges(t *testing.T) {
 	assertNoChange(t, changes, 2*delay)
 }
 
+func TestWatchRegistersDirectoriesCreatedAtRuntime(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "src"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer watcher.Close()
+	if err := RegisterDirectories(watcher, root, []string{"src"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	filter, err := NewFilter(root, []string{"src/**/*.c"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	const delay = 200 * time.Millisecond
+	changes := Watch(ctx, watcher, filter, delay)
+
+	newDirectory := filepath.Join(root, "src", "new")
+	filePath := filepath.Join(newDirectory, "x.c")
+	if err := os.Mkdir(newDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filePath, []byte("int x;\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	change := receiveChange(t, changes)
+	if !reflect.DeepEqual(change.Paths, []string{filePath}) {
+		t.Errorf("change paths = %#v, want %#v", change.Paths, []string{filePath})
+	}
+
+	if err := os.RemoveAll(newDirectory); err != nil {
+		t.Fatal(err)
+	}
+	drainChanges(t, changes, 2*delay)
+	if err := os.Mkdir(newDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filePath, []byte("int x;\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	change = receiveChange(t, changes)
+	if !reflect.DeepEqual(change.Paths, []string{filePath}) {
+		t.Errorf("change after recreating directory = %#v, want %#v", change.Paths, []string{filePath})
+	}
+
+	cancel()
+	waitForClose(t, changes)
+}
+
 func TestWatchStopsOnContextCancellation(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Mkdir(filepath.Join(root, "src"), 0o700); err != nil {
@@ -107,5 +161,33 @@ func assertNoChange(t *testing.T, changes <-chan Change, duration time.Duration)
 		}
 		t.Fatalf("unexpected change: %#v", change)
 	case <-time.After(duration):
+	}
+}
+
+func drainChanges(t *testing.T, changes <-chan Change, duration time.Duration) {
+	t.Helper()
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	for {
+		select {
+		case _, ok := <-changes:
+			if !ok {
+				t.Fatal("change channel closed unexpectedly")
+			}
+		case <-timer.C:
+			return
+		}
+	}
+}
+
+func waitForClose(t *testing.T, changes <-chan Change) {
+	t.Helper()
+	select {
+	case _, ok := <-changes:
+		if ok {
+			t.Fatal("change channel remained open after cancellation")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("watch goroutine did not exit after cancellation")
 	}
 }
