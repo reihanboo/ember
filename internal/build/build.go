@@ -2,6 +2,7 @@ package build
 
 import (
 	"context"
+	"errors"
 	"io"
 	"time"
 
@@ -16,15 +17,19 @@ type Spec struct {
 }
 
 type Result struct {
-	Success  bool
-	Duration time.Duration
-	ExitCode int
-	Err      error
+	Success   bool
+	Cancelled bool
+	Duration  time.Duration
+	ExitCode  int
+	Err       error
 }
 
 func Run(ctx context.Context, spec Spec) Result {
 	started := time.Now()
-	process, err := proc.Start(ctx, proc.Spec{
+	if err := ctx.Err(); err != nil {
+		return Result{Cancelled: true, Duration: time.Since(started), ExitCode: -1, Err: err}
+	}
+	process, err := proc.Start(context.Background(), proc.Spec{
 		Cmd:    spec.Cmd,
 		Cwd:    spec.Cwd,
 		Env:    spec.Env,
@@ -32,14 +37,35 @@ func Run(ctx context.Context, spec Spec) Result {
 		Tag:    "build",
 	})
 	if err != nil {
-		return Result{Duration: time.Since(started), ExitCode: -1, Err: err}
+		return Result{
+			Cancelled: ctx.Err() != nil,
+			Duration:  time.Since(started),
+			ExitCode:  -1,
+			Err:       errors.Join(err, ctx.Err()),
+		}
 	}
 
-	exit := process.Wait()
-	return Result{
-		Success:  exit.Code == 0 && exit.Err == nil,
-		Duration: time.Since(started),
-		ExitCode: exit.Code,
-		Err:      exit.Err,
+	exitResults := make(chan proc.ExitResult, 1)
+	go func() {
+		exitResults <- process.Wait()
+	}()
+
+	select {
+	case exit := <-exitResults:
+		return Result{
+			Success:  exit.Code == 0 && exit.Err == nil,
+			Duration: time.Since(started),
+			ExitCode: exit.Code,
+			Err:      exit.Err,
+		}
+	case <-ctx.Done():
+		stopErr := process.Stop(ctx, 0)
+		exit := <-exitResults
+		return Result{
+			Cancelled: true,
+			Duration:  time.Since(started),
+			ExitCode:  exit.Code,
+			Err:       errors.Join(exit.Err, stopErr),
+		}
 	}
 }
