@@ -1,1 +1,1 @@
-ember is an air-style live rebuild and restart tool for C and C++.
+ember is an live rebuild and restart tool for C and C++.
