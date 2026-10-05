@@ -14,3 +14,4 @@ A control instance is live only when it returns a valid response to a status pro
 Control dispatch maps reload/build/stop/start to dedicated supervisor events and waits for stop/start replies.
 Status uses integer truncated milliseconds and RFC3339Nano timestamps; unset last_change is empty and rendered as never.
 Missing or invalid port files and failed connections are treated as no running instance by CLI clients.
+Keyboard input returns one byte as a rune because configured hotkeys are ASCII.
