@@ -57,7 +57,13 @@ func TestStopSendsSIGTERM(t *testing.T) {
 
 func TestStopForceKillsProcessGroup(t *testing.T) {
 	binary := buildTestproc(t)
-	process := startLinuxTestproc(t, binary, "ignore-term", nil)
+	output := make(chan string, 1)
+	process := startLinuxTestproc(t, binary, "ignore-term", output)
+	select {
+	case <-output:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for process to ignore SIGTERM")
+	}
 	if err := process.Stop(context.Background(), 50*time.Millisecond); err != nil {
 		t.Fatal(err)
 	}
