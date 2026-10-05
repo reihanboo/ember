@@ -52,6 +52,7 @@ type Supervisor struct {
 	currentOutput string
 	buildID       uint64
 	buildCancel   context.CancelFunc
+	buildOnly     bool
 	snapshot      Snapshot
 	snapshotM     sync.RWMutex
 	buildWG       sync.WaitGroup
@@ -137,9 +138,10 @@ func (s *Supervisor) handle(ctx context.Context, event Event) {
 
 	state := s.Snapshot().State
 	switch event.(type) {
-	case FileChanged, ReloadRequested:
+	case FileChanged, ReloadRequested, BuildOnlyRequested:
+		_, buildOnly := event.(BuildOnlyRequested)
 		if state == Building {
-			s.startBuild(ctx)
+			s.startBuild(ctx, buildOnly)
 			return
 		}
 		if state != Idle && state != Running && state != BuildFailed {
@@ -150,13 +152,13 @@ func (s *Supervisor) handle(ctx context.Context, event Event) {
 			s.logger.Debug(fmt.Sprintf("ignored build trigger %T %+v without a builder", event, event))
 			return
 		}
-		if state == Running && s.stopsRunning {
+		if !buildOnly && state == Running && s.stopsRunning {
 			if err := s.stopApp(ctx); err != nil {
 				s.logger.Error(fmt.Sprintf("stop app before build: %v", err))
 				return
 			}
 		}
-		s.startBuild(ctx)
+		s.startBuild(ctx, buildOnly)
 	case ChildExited:
 		exited := event.(ChildExited)
 		currentPID := 0
@@ -192,8 +194,9 @@ func (s *Supervisor) handle(ctx context.Context, event Event) {
 	}
 }
 
-func (s *Supervisor) startBuild(ctx context.Context) {
+func (s *Supervisor) startBuild(ctx context.Context, buildOnly bool) {
 	s.cancelBuild()
+	s.buildOnly = buildOnly
 	s.buildID++
 	buildID := s.buildID
 	buildCtx, cancel := context.WithCancel(ctx)
@@ -225,6 +228,8 @@ func (s *Supervisor) cancelBuild() {
 }
 
 func (s *Supervisor) finishBuild(ctx context.Context, result build.Result) {
+	buildOnly := s.buildOnly
+	s.buildOnly = false
 	s.snapshotM.Lock()
 	s.snapshot.LastBuildDuration = result.Duration
 	s.snapshot.LastBuildOK = result.Success && !result.Cancelled
@@ -249,6 +254,14 @@ func (s *Supervisor) finishBuild(ctx context.Context, result build.Result) {
 			return
 		}
 		s.logger.Error(fmt.Sprintf("build failed: %v", failure))
+		return
+	}
+	if buildOnly {
+		state := Idle
+		if s.process != nil {
+			state = Running
+		}
+		s.setState(state)
 		return
 	}
 	s.restartApp(ctx)

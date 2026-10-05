@@ -28,7 +28,9 @@ func eventForRequest(request Request) (sup.Event, error) {
 	switch request {
 	case RequestReload:
 		return sup.ReloadRequested{}, nil
-	case RequestBuild, RequestStop, RequestStart, RequestStatus, RequestQuit:
+	case RequestBuild:
+		return sup.BuildOnlyRequested{}, nil
+	case RequestStop, RequestStart, RequestStatus, RequestQuit:
 		return sup.ControlEvent{Command: string(request)}, nil
 	default:
 		return nil, fmt.Errorf("unsupported control request %q", request)

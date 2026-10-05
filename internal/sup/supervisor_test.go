@@ -530,6 +530,70 @@ func TestStopsRunningBeforeBuild(t *testing.T) {
 	}
 }
 
+func TestBuildOnlyDoesNotRestartRunningApp(t *testing.T) {
+	useSupervisorWorkingDirectory(t)
+	if err := os.MkdirAll(filepath.Join(".ember", "bin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	order := make(chan string, 8)
+	builder := successfulBuilder{calls: make(chan build.Spec, 2), order: order}
+	runner := &fakeRunner{calls: make(chan proc.Spec, 2), processes: make(chan *fakeProcess, 2), order: order, nextPID: 700}
+	logger := make(recordingLogger, 4)
+	supervisor := NewSupervisor(
+		builder,
+		runner,
+		build.Spec{Cmd: "cc -o {out}"},
+		proc.Spec{Cmd: "{out} --flag", Cwd: "."},
+		1500*time.Millisecond,
+		true,
+		fakeClock{},
+		logger,
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runResult := make(chan error, 1)
+	go func() {
+		runResult <- supervisor.Run(ctx)
+	}()
+
+	supervisor.Send(ReloadRequested{})
+	readBuildCall(t, builder.calls)
+	if got := readOrder(t, order); got != "build-ok" {
+		t.Fatalf("initial build event = %q, want build-ok", got)
+	}
+	if got := readOrder(t, order); got != "start:700" {
+		t.Fatalf("initial runner event = %q, want start:700", got)
+	}
+	readRunCall(t, runner.calls)
+	process := readFakeProcess(t, runner.processes)
+	waitForSupervisorState(t, supervisor, Running)
+
+	supervisor.Send(BuildOnlyRequested{})
+	readBuildCall(t, builder.calls)
+	if got := readOrder(t, order); got != "build-ok" {
+		t.Fatalf("build-only event = %q, want build-ok", got)
+	}
+	waitForSupervisorState(t, supervisor, Running)
+	if snapshot := supervisor.Snapshot(); snapshot.PID != process.Pid() || !snapshot.LastBuildOK {
+		t.Errorf("snapshot after build-only = %#v, want successful build and unchanged pid %d", snapshot, process.Pid())
+	}
+	select {
+	case spec := <-runner.calls:
+		t.Errorf("build-only started another process with spec %#v", spec)
+	default:
+	}
+	select {
+	case event := <-order:
+		t.Errorf("build-only affected the running app: %q", event)
+	default:
+	}
+
+	cancel()
+	awaitSupervisorRun(t, runResult)
+	process.exit(proc.ExitResult{Code: 0})
+}
+
 func TestSuccessfulBuildRestartsAppAndPrunesOutputs(t *testing.T) {
 	useSupervisorWorkingDirectory(t)
 	if err := os.MkdirAll(filepath.Join(".ember", "bin"), 0o700); err != nil {

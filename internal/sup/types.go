@@ -20,6 +20,8 @@ type ChangeEvent = FileChanged
 
 type ReloadRequested struct{}
 
+type BuildOnlyRequested struct{}
+
 type ControlEvent struct {
 	Command string
 }
@@ -42,6 +44,7 @@ type BuildFinishedEvent struct {
 
 func (FileChanged) isEvent()        {}
 func (ReloadRequested) isEvent()    {}
+func (BuildOnlyRequested) isEvent() {}
 func (ControlEvent) isEvent()       {}
 func (KeyEvent) isEvent()           {}
 func (ChildExited) isEvent()        {}

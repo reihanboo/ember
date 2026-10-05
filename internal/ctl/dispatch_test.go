@@ -24,7 +24,7 @@ func TestDispatcherSendsSupervisorEventsAndRepliesOK(t *testing.T) {
 		want    sup.Event
 	}{
 		{request: RequestReload, want: sup.ReloadRequested{}},
-		{request: RequestBuild, want: sup.ControlEvent{Command: "build"}},
+		{request: RequestBuild, want: sup.BuildOnlyRequested{}},
 		{request: RequestStop, want: sup.ControlEvent{Command: "stop"}},
 		{request: RequestStart, want: sup.ControlEvent{Command: "start"}},
 		{request: RequestStatus, want: sup.ControlEvent{Command: "status"}},
