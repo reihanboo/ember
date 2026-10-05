@@ -35,7 +35,7 @@ func (clock fakeClock) Now() time.Time {
 
 func TestSupervisorProcessesEventsInOrderAndStopsOnCancellation(t *testing.T) {
 	logger := make(recordingLogger, 2)
-	supervisor := NewSupervisor(nil, nil, build.Spec{}, proc.Spec{}, 0, fakeClock{}, logger)
+	supervisor := NewSupervisor(nil, nil, build.Spec{}, proc.Spec{}, 0, false, fakeClock{}, logger)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	runResult := make(chan error, 1)
@@ -61,7 +61,7 @@ func TestSupervisorProcessesEventsInOrderAndStopsOnCancellation(t *testing.T) {
 func TestSupervisorUsesClockForChangeTimestamp(t *testing.T) {
 	now := time.Date(2026, time.October, 5, 12, 0, 0, 0, time.UTC)
 	logger := make(recordingLogger, 1)
-	supervisor := NewSupervisor(nil, nil, build.Spec{}, proc.Spec{}, 0, fakeClock{now: now}, logger)
+	supervisor := NewSupervisor(nil, nil, build.Spec{}, proc.Spec{}, 0, false, fakeClock{now: now}, logger)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	runResult := make(chan error, 1)
@@ -108,6 +108,7 @@ func TestBuildTriggersStartOneBuild(t *testing.T) {
 				build.Spec{Cmd: "cc -o {out} main.c", Cwd: "."},
 				proc.Spec{},
 				0,
+				false,
 				fakeClock{},
 				logger,
 			)
@@ -225,9 +226,13 @@ func (process *fakeProcess) exit(result proc.ExitResult) {
 type controlledBuilder struct {
 	calls   chan build.Spec
 	results chan build.Result
+	order   chan string
 }
 
 func (builder controlledBuilder) Build(ctx context.Context, spec build.Spec) build.Result {
+	if builder.order != nil {
+		builder.order <- "build"
+	}
 	builder.calls <- spec
 	select {
 	case result := <-builder.results:
@@ -284,6 +289,7 @@ func TestNewTriggerSupersedesBuildingBuild(t *testing.T) {
 		build.Spec{Cmd: "cc -o {out}"},
 		proc.Spec{Cmd: "{out}"},
 		2*time.Second,
+		false,
 		fakeClock{},
 		logger,
 	)
@@ -358,6 +364,7 @@ func TestFailedBuildKeepsRunningAppUntilNextSuccess(t *testing.T) {
 		build.Spec{Cmd: "cc -o {out}"},
 		proc.Spec{Cmd: "{out}"},
 		2*time.Second,
+		false,
 		fakeClock{},
 		logger,
 	)
@@ -420,6 +427,109 @@ func TestFailedBuildKeepsRunningAppUntilNextSuccess(t *testing.T) {
 	newProcess.exit(proc.ExitResult{Code: 0})
 }
 
+func TestStopsRunningBeforeBuild(t *testing.T) {
+	for _, outcome := range []struct {
+		name   string
+		result build.Result
+		starts bool
+	}{
+		{name: "success", result: build.Result{Success: true}, starts: true},
+		{name: "failure", result: build.Result{ExitCode: 1, Err: errors.New("compiler rejected source")}},
+	} {
+		t.Run(outcome.name, func(t *testing.T) {
+			useSupervisorWorkingDirectory(t)
+			order := make(chan string, 8)
+			builder := controlledBuilder{
+				calls:   make(chan build.Spec, 2),
+				results: make(chan build.Result, 2),
+				order:   order,
+			}
+			runner := &fakeRunner{calls: make(chan proc.Spec, 2), processes: make(chan *fakeProcess, 2), order: order, nextPID: 500}
+			logger := make(recordingLogger, 8)
+			supervisor := NewSupervisor(
+				builder,
+				runner,
+				build.Spec{Cmd: "cc -o {out}"},
+				proc.Spec{Cmd: "{out}"},
+				2*time.Second,
+				true,
+				fakeClock{},
+				logger,
+			)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			runResult := make(chan error, 1)
+			go func() {
+				runResult <- supervisor.Run(ctx)
+			}()
+
+			supervisor.Send(FileChanged{Paths: []string{"main.c"}})
+			if got := readOrder(t, order); got != "build" {
+				t.Fatalf("initial order = %q, want build", got)
+			}
+			readBuildCall(t, builder.calls)
+			builder.results <- build.Result{Success: true}
+			if got := readOrder(t, order); got != "start:500" {
+				t.Fatalf("initial app order = %q, want start:500", got)
+			}
+			readRunCall(t, runner.calls)
+			oldProcess := readFakeProcess(t, runner.processes)
+			waitForSupervisorState(t, supervisor, Running)
+
+			supervisor.Send(ReloadRequested{})
+			if got := readOrder(t, order); got != "stop:500:2s" {
+				t.Fatalf("pre-build order = %q, want old app stopped first", got)
+			}
+			if got := readOrder(t, order); got != "build" {
+				t.Fatalf("pre-build order = %q, want build after stop", got)
+			}
+			readBuildCall(t, builder.calls)
+			if snapshot := supervisor.Snapshot(); snapshot.State != Building || snapshot.PID != 0 {
+				t.Errorf("snapshot during build = %#v, want Building with no app", snapshot)
+			}
+			builder.results <- outcome.result
+
+			if outcome.starts {
+				if got := readOrder(t, order); got != "start:501" {
+					t.Fatalf("replacement app order = %q, want start:501", got)
+				}
+				readRunCall(t, runner.calls)
+				newProcess := readFakeProcess(t, runner.processes)
+				waitForSupervisorState(t, supervisor, Running)
+				if snapshot := supervisor.Snapshot(); snapshot.PID != 501 || !snapshot.LastBuildOK {
+					t.Errorf("snapshot after successful build = %#v, want replacement app running", snapshot)
+				}
+				cancel()
+				awaitSupervisorRun(t, runResult)
+				oldProcess.exit(proc.ExitResult{Code: 1})
+				newProcess.exit(proc.ExitResult{Code: 0})
+				return
+			}
+
+			message := readSupervisorLogContaining(t, logger, "app remains stopped because stops_running is enabled")
+			if !strings.Contains(message, "compiler rejected source") {
+				t.Errorf("failure log = %q, want compiler error", message)
+			}
+			if snapshot := supervisor.Snapshot(); snapshot.State != BuildFailed || snapshot.PID != 0 || snapshot.LastBuildOK {
+				t.Errorf("snapshot after failed build = %#v, want BuildFailed with no app", snapshot)
+			}
+			select {
+			case <-runner.calls:
+				t.Error("runner started an app after failed build")
+			default:
+			}
+			select {
+			case event := <-order:
+				t.Errorf("unexpected app operation after failed build: %q", event)
+			default:
+			}
+
+			cancel()
+			awaitSupervisorRun(t, runResult)
+		})
+	}
+}
+
 func TestSuccessfulBuildRestartsAppAndPrunesOutputs(t *testing.T) {
 	useSupervisorWorkingDirectory(t)
 	if err := os.MkdirAll(filepath.Join(".ember", "bin"), 0o700); err != nil {
@@ -436,6 +546,7 @@ func TestSuccessfulBuildRestartsAppAndPrunesOutputs(t *testing.T) {
 		build.Spec{Cmd: "cc -o {out}"},
 		proc.Spec{Cmd: "{out} --flag", Cwd: "."},
 		1500*time.Millisecond,
+		false,
 		fakeClock{},
 		logger,
 	)
@@ -529,6 +640,7 @@ func TestChildExitWaitsForNextChangeToRestart(t *testing.T) {
 		build.Spec{Cmd: "cc -o {out}"},
 		proc.Spec{Cmd: "{out}"},
 		2*time.Second,
+		false,
 		fakeClock{},
 		logger,
 	)
@@ -614,6 +726,22 @@ func readSupervisorLog(t *testing.T, logger <-chan string) string {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for supervisor event handling")
 		return ""
+	}
+}
+
+func readSupervisorLogContaining(t *testing.T, logger <-chan string, wanted string) string {
+	t.Helper()
+	deadline := time.After(time.Second)
+	for {
+		select {
+		case message := <-logger:
+			if strings.Contains(message, wanted) {
+				return message
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for supervisor log containing %q", wanted)
+			return ""
+		}
 	}
 }
 

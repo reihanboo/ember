@@ -46,6 +46,7 @@ type Supervisor struct {
 	buildSpec     build.Spec
 	runSpec       proc.Spec
 	killTimeout   time.Duration
+	stopsRunning  bool
 	process       Process
 	buildOutput   string
 	currentOutput string
@@ -63,7 +64,7 @@ func (systemClock) Now() time.Time {
 	return time.Now()
 }
 
-func NewSupervisor(builder Builder, runner Runner, buildSpec build.Spec, runSpec proc.Spec, killTimeout time.Duration, clock Clock, logger Logger) *Supervisor {
+func NewSupervisor(builder Builder, runner Runner, buildSpec build.Spec, runSpec proc.Spec, killTimeout time.Duration, stopsRunning bool, clock Clock, logger Logger) *Supervisor {
 	if clock == nil {
 		clock = systemClock{}
 	}
@@ -71,14 +72,15 @@ func NewSupervisor(builder Builder, runner Runner, buildSpec build.Spec, runSpec
 		logger = ui.NewLogger(os.Stderr, clock.Now, false, ui.DebugLevel)
 	}
 	return &Supervisor{
-		events:      make(chan Event, 32),
-		builder:     builder,
-		runner:      runner,
-		clock:       clock,
-		logger:      logger,
-		buildSpec:   buildSpec,
-		runSpec:     runSpec,
-		killTimeout: killTimeout,
+		events:       make(chan Event, 32),
+		builder:      builder,
+		runner:       runner,
+		clock:        clock,
+		logger:       logger,
+		buildSpec:    buildSpec,
+		runSpec:      runSpec,
+		killTimeout:  killTimeout,
+		stopsRunning: stopsRunning,
 		snapshot: Snapshot{
 			State: Idle,
 		},
@@ -145,6 +147,12 @@ func (s *Supervisor) handle(ctx context.Context, event Event) {
 		if s.builder == nil {
 			s.logger.Debug(fmt.Sprintf("ignored build trigger %T %+v without a builder", event, event))
 			return
+		}
+		if state == Running && s.stopsRunning {
+			if err := s.stopApp(ctx); err != nil {
+				s.logger.Error(fmt.Sprintf("stop app before build: %v", err))
+				return
+			}
 		}
 		s.startBuild(ctx)
 	case ChildExited:
@@ -232,6 +240,10 @@ func (s *Supervisor) finishBuild(ctx context.Context, result build.Result) {
 		if failure == nil {
 			failure = fmt.Errorf("exit code %d", result.ExitCode)
 		}
+		if s.stopsRunning && s.process == nil {
+			s.logger.Error(fmt.Sprintf("build failed: %v; app remains stopped because stops_running is enabled", failure))
+			return
+		}
 		s.logger.Error(fmt.Sprintf("build failed: %v", failure))
 		return
 	}
@@ -246,16 +258,10 @@ func (s *Supervisor) restartApp(ctx context.Context) {
 	}
 
 	previousOutput := s.currentOutput
-	if s.process != nil {
-		if err := s.process.Stop(ctx, s.killTimeout); err != nil {
-			s.setState(Running)
-			s.logger.Debug(fmt.Sprintf("stop old app: %v", err))
-			return
-		}
-		s.process = nil
-		s.snapshotM.Lock()
-		s.snapshot.PID = 0
-		s.snapshotM.Unlock()
+	if err := s.stopApp(ctx); err != nil {
+		s.setState(Running)
+		s.logger.Debug(fmt.Sprintf("stop old app: %v", err))
+		return
 	}
 
 	runSpec := s.runSpec
@@ -291,6 +297,20 @@ func (s *Supervisor) restartApp(ctx context.Context) {
 	if err := outdir.Prune(keep...); err != nil {
 		s.logger.Debug(fmt.Sprintf("prune old outputs: %v", err))
 	}
+}
+
+func (s *Supervisor) stopApp(ctx context.Context) error {
+	if s.process == nil {
+		return nil
+	}
+	if err := s.process.Stop(ctx, s.killTimeout); err != nil {
+		return err
+	}
+	s.process = nil
+	s.snapshotM.Lock()
+	s.snapshot.PID = 0
+	s.snapshotM.Unlock()
+	return nil
 }
 
 func (s *Supervisor) setState(state State) {
