@@ -10,10 +10,14 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
+	"time"
 )
 
 type Handler func(Request) []string
+
+const serverProbeTimeout = time.Second
 
 type Server struct {
 	listener     net.Listener
@@ -30,6 +34,11 @@ type Server struct {
 func StartServer(controlFile string, handler Handler) (*Server, error) {
 	if handler == nil {
 		return nil, errors.New("control handler is nil")
+	}
+	if running, port, err := existingServerResponds(controlFile); err != nil {
+		return nil, err
+	} else if running {
+		return nil, fmt.Errorf("control server is already running for this project on port %d", port)
 	}
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
@@ -116,6 +125,51 @@ func (server *Server) serveConnection(connection net.Conn) {
 func isLoopbackPeer(address net.Addr) bool {
 	tcpAddress, ok := address.(*net.TCPAddr)
 	return ok && tcpAddress.IP != nil && tcpAddress.IP.IsLoopback()
+}
+
+func existingServerResponds(controlFile string) (bool, int, error) {
+	contents, err := os.ReadFile(controlFile)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, 0, nil
+	}
+	if err != nil {
+		return false, 0, fmt.Errorf("read existing control port file: %w", err)
+	}
+	port, err := strconv.Atoi(strings.TrimSpace(string(contents)))
+	if err != nil || port < 1 || port > 65535 {
+		return false, 0, nil
+	}
+	connection, err := net.DialTimeout("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), serverProbeTimeout)
+	if err != nil {
+		return false, 0, nil
+	}
+	defer connection.Close()
+	if err := connection.SetDeadline(time.Now().Add(serverProbeTimeout)); err != nil {
+		return false, 0, nil
+	}
+	request, err := EncodeRequest(RequestStatus)
+	if err != nil {
+		return false, 0, nil
+	}
+	if _, err := io.Copy(connection, bytes.NewReader(request)); err != nil {
+		return false, 0, nil
+	}
+	scanner := bufio.NewScanner(connection)
+	scanner.Buffer(make([]byte, 1024), 1<<20)
+	var response bytes.Buffer
+	for scanner.Scan() {
+		line := scanner.Text()
+		if response.Len()+len(line)+1 > 1<<20 {
+			return false, 0, nil
+		}
+		response.WriteString(line)
+		response.WriteByte('\n')
+		if line == responseTerminator {
+			_, err := DecodeResponse(response.Bytes())
+			return err == nil, port, nil
+		}
+	}
+	return false, 0, nil
 }
 
 func writePortFile(path string, port int) error {

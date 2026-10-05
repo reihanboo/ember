@@ -88,6 +88,86 @@ func TestServerPublishesPortServesRequestsAndRemovesPortFile(t *testing.T) {
 	}
 }
 
+func TestStartServerRefusesLiveInstance(t *testing.T) {
+	controlFile := filepath.Join(t.TempDir(), ".ember", "ctl")
+	first, err := StartServer(controlFile, func(Request) []string {
+		return []string{"running"}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := first.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	originalPortFile, err := os.ReadFile(controlFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := StartServer(controlFile, func(Request) []string {
+		return []string{"unexpected"}
+	})
+	if err == nil {
+		if second != nil {
+			_ = second.Close()
+		}
+		t.Fatal("StartServer() succeeded while a server was responding")
+	}
+	if !strings.Contains(err.Error(), "already running") {
+		t.Errorf("StartServer() error = %q, want already-running message", err)
+	}
+	currentPortFile, err := os.ReadFile(controlFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(currentPortFile, originalPortFile) {
+		t.Errorf("port file after rejected start = %q, want unchanged %q", currentPortFile, originalPortFile)
+	}
+}
+
+func TestStartServerOverwritesStalePortFile(t *testing.T) {
+	oldListener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stalePort := oldListener.Addr().(*net.TCPAddr).Port
+	if err := oldListener.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	controlFile := filepath.Join(t.TempDir(), ".ember", "ctl")
+	if err := os.MkdirAll(filepath.Dir(controlFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(controlFile, []byte(strconv.Itoa(stalePort)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server, err := StartServer(controlFile, func(Request) []string {
+		return []string{"running"}
+	})
+	if err != nil {
+		t.Fatalf("StartServer() rejected stale port file: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := server.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	portContents, err := os.ReadFile(controlFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(strings.TrimSpace(string(portContents)))
+	if err != nil || port < 1 || port > 65535 {
+		t.Fatalf("overwritten control port file contains %q, want valid port (parse error: %v)", portContents, err)
+	}
+	if got := server.listener.Addr().(*net.TCPAddr).Port; got != port {
+		t.Errorf("listener port = %d, port file = %d", got, port)
+	}
+}
+
 func TestIsLoopbackPeer(t *testing.T) {
 	for _, test := range []struct {
 		name    string
