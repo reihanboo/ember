@@ -174,6 +174,7 @@ func runCommand(ctx context.Context, registry *proc.Registry, stdout, stderr io.
 	go func() {
 		supervisorDone <- supervisor.Run(runCtx)
 	}()
+	go readKeyboard(runCtx, os.Stdin, stdout, supervisor, logger, cancel)
 	supervisor.Send(sup.ReloadRequested{})
 	select {
 	case err := <-supervisorDone:
@@ -197,6 +198,50 @@ func (commandBuilder) Build(ctx context.Context, spec build.Spec) build.Result {
 
 type appRunner struct {
 	registry *proc.Registry
+}
+
+func readKeyboard(ctx context.Context, input *os.File, output io.Writer, supervisor *sup.Supervisor, logger *ui.Logger, cancel context.CancelFunc) {
+	for {
+		key, read, err := ui.ReadKeyContext(ctx, input)
+		if err != nil {
+			if ctx.Err() == nil && !errors.Is(err, io.EOF) {
+				logger.Error(err.Error())
+			}
+			return
+		}
+		if !read {
+			return
+		}
+		event, ok := ui.KeyEventForByte(byte(key))
+		if !ok {
+			continue
+		}
+		switch event {
+		case ui.ReloadKey:
+			supervisor.Send(sup.ReloadRequested{})
+		case ui.ToggleKey:
+			var err error
+			if supervisor.Snapshot().PID > 0 {
+				reply := make(chan error, 1)
+				supervisor.Send(sup.StopRequested{Reply: reply})
+				err = <-reply
+			} else {
+				reply := make(chan error, 1)
+				supervisor.Send(sup.StartRequested{Reply: reply})
+				err = <-reply
+			}
+			if err != nil {
+				logger.Error(err.Error())
+			}
+		case ui.ClearKey:
+			if err := ui.ClearScreen(output); err != nil {
+				logger.Error(err.Error())
+			}
+		case ui.QuitKey:
+			cancel()
+			return
+		}
+	}
 }
 
 func (runner appRunner) Start(_ context.Context, spec proc.Spec) (sup.Process, error) {
