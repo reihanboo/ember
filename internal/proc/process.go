@@ -28,6 +28,7 @@ type Process struct {
 	command   *exec.Cmd
 	outputs   []*lineWriter
 	waitOnce  sync.Once
+	stopMu    sync.Mutex
 	jobMu     sync.Mutex
 	jobHandle uintptr
 	jobHeld   bool

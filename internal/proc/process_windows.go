@@ -1,6 +1,7 @@
 package proc
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -52,7 +53,13 @@ func closeProcessJob(job uintptr) error {
 	return windows.CloseHandle(windows.Handle(job))
 }
 
-func (p *Process) Stop(grace, timeout time.Duration) error {
+func (p *Process) Stop(ctx context.Context, timeout time.Duration) error {
+	p.stopMu.Lock()
+	defer p.stopMu.Unlock()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	p.jobMu.Lock()
 	job := p.jobHandle
 	if job == 0 {
@@ -70,8 +77,8 @@ func (p *Process) Stop(grace, timeout time.Duration) error {
 	}()
 
 	breakErr := windows.GenerateConsoleCtrlEvent(windows.CTRL_BREAK_EVENT, uint32(p.Pid()))
-	if breakErr == nil {
-		stopped, err := waitForJobAndProcess(job, processDone, grace)
+	if breakErr == nil && ctx.Err() == nil {
+		stopped, err := waitForJobAndProcess(ctx, job, processDone, timeout)
 		if err == nil && stopped {
 			return p.releaseJob()
 		}
@@ -81,15 +88,10 @@ func (p *Process) Stop(grace, timeout time.Duration) error {
 		closeErr := p.releaseJob()
 		return errors.Join(fmt.Errorf("terminate process job: %w", err), closeErr)
 	}
-	stopped, waitErr := waitForJobAndProcess(job, processDone, timeout)
-	closeErr := p.releaseJob()
-	if waitErr != nil {
-		return errors.Join(fmt.Errorf("wait for process job: %w", waitErr), closeErr)
+	if err := waitForJobAndProcessGone(job, processDone); err != nil {
+		return fmt.Errorf("wait for terminated process job: %w", err)
 	}
-	if !stopped {
-		return errors.Join(fmt.Errorf("process %d did not stop within %s after job termination", p.Pid(), timeout), closeErr)
-	}
-	return closeErr
+	return p.releaseJob()
 }
 
 type windowsJobAccounting struct {
@@ -103,7 +105,7 @@ type windowsJobAccounting struct {
 	totalTerminatedProcesses uint32
 }
 
-func waitForJobAndProcess(job uintptr, processDone <-chan struct{}, timeout time.Duration) (bool, error) {
+func waitForJobAndProcess(ctx context.Context, job uintptr, processDone <-chan struct{}, timeout time.Duration) (bool, error) {
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	ticker := time.NewTicker(10 * time.Millisecond)
@@ -131,6 +133,32 @@ func waitForJobAndProcess(job uintptr, processDone <-chan struct{}, timeout time
 		case <-ticker.C:
 		case <-timer.C:
 			return false, nil
+		case <-ctx.Done():
+			return false, nil
+		}
+	}
+}
+
+func waitForJobAndProcessGone(job uintptr, processDone <-chan struct{}) error {
+	done := processDone
+	for {
+		var accounting windowsJobAccounting
+		if err := windows.QueryInformationJobObject(
+			windows.Handle(job),
+			windows.JobObjectBasicAccountingInformation,
+			uintptr(unsafe.Pointer(&accounting)),
+			uint32(unsafe.Sizeof(accounting)),
+			nil,
+		); err != nil {
+			return fmt.Errorf("query job object process count: %w", err)
+		}
+		if accounting.activeProcesses == 0 && done == nil {
+			return nil
+		}
+		select {
+		case <-done:
+			done = nil
+		case <-time.After(10 * time.Millisecond):
 		}
 	}
 }

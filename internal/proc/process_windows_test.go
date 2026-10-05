@@ -2,6 +2,7 @@ package proc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -51,7 +52,7 @@ func TestStopAllowsCtrlBreakHandlerToExit(t *testing.T) {
 	if pid := readWindowsTestprocPID(t, output); pid <= 0 {
 		t.Fatalf("helper pid = %d, want a positive pid", pid)
 	}
-	if err := process.Stop(3*time.Second, time.Second); err != nil {
+	if err := process.Stop(context.Background(), 3*time.Second); err != nil {
 		t.Fatal(err)
 	}
 	if result := process.Wait(); result.Code != 23 {
@@ -75,7 +76,7 @@ func TestStopForceKillsIgnoringCtrlBreak(t *testing.T) {
 
 	grace := 300 * time.Millisecond
 	started := time.Now()
-	if err := process.Stop(grace, time.Second); err != nil {
+	if err := process.Stop(context.Background(), grace); err != nil {
 		t.Fatal(err)
 	}
 	if elapsed := time.Since(started); elapsed < grace {
@@ -96,7 +97,7 @@ func TestStopForceKillsIgnoringCtrlBreak(t *testing.T) {
 func TestStopTerminatesSleepingProcess(t *testing.T) {
 	binary := buildTestproc(t)
 	process := startWindowsTestproc(t, binary, "sleep", nil)
-	if err := process.Stop(time.Second, time.Second); err != nil {
+	if err := process.Stop(context.Background(), time.Second); err != nil {
 		t.Fatal(err)
 	}
 	if result := process.Wait(); result.Code == 0 {
@@ -126,7 +127,7 @@ func TestStopTerminatesGrandchild(t *testing.T) {
 	}
 	defer windows.CloseHandle(child)
 
-	if err := process.Stop(time.Second, time.Second); err != nil {
+	if err := process.Stop(context.Background(), time.Second); err != nil {
 		t.Fatal(err)
 	}
 	result, err := windows.WaitForSingleObject(child, 5000)
@@ -159,6 +160,26 @@ func readWindowsTestprocPID(t *testing.T, output <-chan string) int {
 		t.Fatal("timed out waiting for helper pid")
 		return 0
 	}
+}
+
+func waitForProcessExit(pid int, timeout time.Duration) error {
+	handle, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(pid))
+	if err != nil {
+		if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
+			return nil
+		}
+		return fmt.Errorf("open process %d: %w", pid, err)
+	}
+	defer windows.CloseHandle(handle)
+
+	result, err := windows.WaitForSingleObject(handle, uint32(timeout.Milliseconds()))
+	if err != nil {
+		return fmt.Errorf("wait for process %d: %w", pid, err)
+	}
+	if result != windows.WAIT_OBJECT_0 {
+		return fmt.Errorf("process %d did not exit within %s", pid, timeout)
+	}
+	return nil
 }
 
 func startWindowsTestproc(t *testing.T, binary, mode string, output chan string) *Process {

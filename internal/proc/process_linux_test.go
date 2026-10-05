@@ -46,7 +46,7 @@ func TestStartReportsNonexistentCommand(t *testing.T) {
 func TestStopSendsSIGTERM(t *testing.T) {
 	binary := buildTestproc(t)
 	process := startLinuxTestproc(t, binary, "sleep", nil)
-	if err := process.Stop(time.Second, time.Second); err != nil {
+	if err := process.Stop(context.Background(), time.Second); err != nil {
 		t.Fatal(err)
 	}
 	result := process.Wait()
@@ -58,7 +58,7 @@ func TestStopSendsSIGTERM(t *testing.T) {
 func TestStopForceKillsProcessGroup(t *testing.T) {
 	binary := buildTestproc(t)
 	process := startLinuxTestproc(t, binary, "ignore-term", nil)
-	if err := process.Stop(50*time.Millisecond, time.Second); err != nil {
+	if err := process.Stop(context.Background(), 50*time.Millisecond); err != nil {
 		t.Fatal(err)
 	}
 	result := process.Wait()
@@ -83,7 +83,7 @@ func TestStopKillsGrandchild(t *testing.T) {
 		t.Fatal("timed out waiting for grandchild pid")
 	}
 
-	if err := process.Stop(time.Second, time.Second); err != nil {
+	if err := process.Stop(context.Background(), time.Second); err != nil {
 		t.Fatal(err)
 	}
 	if err := waitForProcessExit(childPID, time.Second); err != nil {

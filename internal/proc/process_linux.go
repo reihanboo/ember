@@ -1,6 +1,7 @@
 package proc
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -28,35 +29,39 @@ func processSignal(state *os.ProcessState) os.Signal {
 	return status.Signal()
 }
 
-func (p *Process) Stop(grace, timeout time.Duration) error {
+func (p *Process) Stop(ctx context.Context, timeout time.Duration) error {
+	p.stopMu.Lock()
+	defer p.stopMu.Unlock()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	pgid := p.Pid()
 	if pgid <= 0 {
 		return errors.New("process has no pid")
 	}
-	if err := syscall.Kill(-pgid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
-		return fmt.Errorf("send SIGTERM to process group %d: %w", pgid, err)
-	}
-
 	processDone := make(chan struct{})
 	go func() {
 		p.Wait()
 		close(processDone)
 	}()
-	if waitForProcessGroup(pgid, grace, processDone) {
-		<-processDone
-		return nil
+
+	termErr := syscall.Kill(-pgid, syscall.SIGTERM)
+	if termErr == nil || errors.Is(termErr, syscall.ESRCH) {
+		if waitForProcessGroup(ctx, pgid, timeout, processDone) {
+			<-processDone
+			return nil
+		}
 	}
 	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
 		return fmt.Errorf("send SIGKILL to process group %d: %w", pgid, err)
 	}
-	if !waitForProcessGroup(pgid, timeout, processDone) {
-		return fmt.Errorf("process group %d did not stop within %s after SIGKILL", pgid, timeout)
-	}
+	waitForProcessGroupGone(pgid, processDone)
 	<-processDone
 	return nil
 }
 
-func waitForProcessGroup(pgid int, timeout time.Duration, processDone <-chan struct{}) bool {
+func waitForProcessGroup(ctx context.Context, pgid int, timeout time.Duration, processDone <-chan struct{}) bool {
 	if !processGroupExists(pgid) {
 		return true
 	}
@@ -70,12 +75,27 @@ func waitForProcessGroup(pgid int, timeout time.Duration, processDone <-chan str
 		select {
 		case <-done:
 			done = nil
+		case <-ctx.Done():
+			return !processGroupExists(pgid)
 		case <-ticker.C:
 			if !processGroupExists(pgid) {
 				return true
 			}
 		case <-timer.C:
 			return !processGroupExists(pgid)
+		}
+	}
+}
+
+func waitForProcessGroupGone(pgid int, processDone <-chan struct{}) {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	done := processDone
+	for processGroupExists(pgid) {
+		select {
+		case <-done:
+			done = nil
+		case <-ticker.C:
 		}
 	}
 }
