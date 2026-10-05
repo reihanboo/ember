@@ -25,7 +25,7 @@ type Process interface {
 }
 
 type Runner interface {
-	Start(context.Context) (Process, error)
+	Start(context.Context, proc.Spec) (Process, error)
 }
 
 type Clock interface {
@@ -37,16 +37,21 @@ type Logger interface {
 }
 
 type Supervisor struct {
-	events    chan Event
-	builder   Builder
-	runner    Runner
-	clock     Clock
-	logger    Logger
-	buildSpec build.Spec
-	snapshot  Snapshot
-	snapshotM sync.RWMutex
-	runM      sync.Mutex
-	running   bool
+	events        chan Event
+	builder       Builder
+	runner        Runner
+	clock         Clock
+	logger        Logger
+	buildSpec     build.Spec
+	runSpec       proc.Spec
+	killTimeout   time.Duration
+	process       Process
+	buildOutput   string
+	currentOutput string
+	snapshot      Snapshot
+	snapshotM     sync.RWMutex
+	runM          sync.Mutex
+	running       bool
 }
 
 type systemClock struct{}
@@ -55,7 +60,7 @@ func (systemClock) Now() time.Time {
 	return time.Now()
 }
 
-func NewSupervisor(builder Builder, runner Runner, buildSpec build.Spec, clock Clock, logger Logger) *Supervisor {
+func NewSupervisor(builder Builder, runner Runner, buildSpec build.Spec, runSpec proc.Spec, killTimeout time.Duration, clock Clock, logger Logger) *Supervisor {
 	if clock == nil {
 		clock = systemClock{}
 	}
@@ -63,12 +68,14 @@ func NewSupervisor(builder Builder, runner Runner, buildSpec build.Spec, clock C
 		logger = ui.NewLogger(os.Stderr, clock.Now, false, ui.DebugLevel)
 	}
 	return &Supervisor{
-		events:    make(chan Event, 32),
-		builder:   builder,
-		runner:    runner,
-		clock:     clock,
-		logger:    logger,
-		buildSpec: buildSpec,
+		events:      make(chan Event, 32),
+		builder:     builder,
+		runner:      runner,
+		clock:       clock,
+		logger:      logger,
+		buildSpec:   buildSpec,
+		runSpec:     runSpec,
+		killTimeout: killTimeout,
 		snapshot: Snapshot{
 			State: Idle,
 		},
@@ -132,14 +139,22 @@ func (s *Supervisor) handle(ctx context.Context, event Event) {
 			return
 		}
 		s.startBuild(ctx)
+	case BuildFinishedEvent:
+		if state != Building {
+			s.logger.Debug(fmt.Sprintf("ignored event %T %+v in state %s", event, event, state))
+			return
+		}
+		s.finishBuild(ctx, event.(BuildFinishedEvent).Result)
 	default:
 		s.logger.Debug(fmt.Sprintf("ignored event %T %+v in state %s", event, event, state))
 	}
 }
 
 func (s *Supervisor) startBuild(ctx context.Context) {
+	output := outdir.Next()
 	spec := s.buildSpec
-	spec.Cmd = outdir.Substitute(spec.Cmd, outdir.Next())
+	spec.Cmd = outdir.Substitute(spec.Cmd, output)
+	s.buildOutput = output
 
 	s.snapshotM.Lock()
 	s.snapshot.State = Building
@@ -149,4 +164,82 @@ func (s *Supervisor) startBuild(ctx context.Context) {
 		result := s.builder.Build(ctx, spec)
 		s.Send(BuildFinishedEvent{Result: result})
 	}()
+}
+
+func (s *Supervisor) finishBuild(ctx context.Context, result build.Result) {
+	s.snapshotM.Lock()
+	s.snapshot.LastBuildDuration = result.Duration
+	s.snapshot.LastBuildOK = result.Success && !result.Cancelled
+	s.snapshotM.Unlock()
+
+	if result.Cancelled {
+		state := Idle
+		if s.process != nil {
+			state = Running
+		}
+		s.setState(state)
+		return
+	}
+	if !result.Success {
+		s.setState(BuildFailed)
+		s.logger.Debug(fmt.Sprintf("build failed: %v", result.Err))
+		return
+	}
+	s.restartApp(ctx)
+}
+
+func (s *Supervisor) restartApp(ctx context.Context) {
+	if s.runner == nil {
+		s.setState(BuildFailed)
+		s.logger.Debug("cannot start app without a runner")
+		return
+	}
+
+	previousOutput := s.currentOutput
+	if s.process != nil {
+		if err := s.process.Stop(ctx, s.killTimeout); err != nil {
+			s.setState(Running)
+			s.logger.Debug(fmt.Sprintf("stop old app: %v", err))
+			return
+		}
+		s.process = nil
+		s.snapshotM.Lock()
+		s.snapshot.PID = 0
+		s.snapshotM.Unlock()
+	}
+
+	runSpec := s.runSpec
+	runSpec.Cmd = outdir.Substitute(runSpec.Cmd, s.buildOutput)
+	process, err := s.runner.Start(ctx, runSpec)
+	if err != nil {
+		s.setState(BuildFailed)
+		s.logger.Debug(fmt.Sprintf("start new app: %v", err))
+		return
+	}
+	if process == nil {
+		s.setState(BuildFailed)
+		s.logger.Debug("runner returned no process")
+		return
+	}
+
+	s.process = process
+	s.currentOutput = s.buildOutput
+	s.snapshotM.Lock()
+	s.snapshot.State = Running
+	s.snapshot.PID = process.Pid()
+	s.snapshotM.Unlock()
+
+	keep := []string{s.currentOutput}
+	if previousOutput != "" && previousOutput != s.currentOutput {
+		keep = append(keep, previousOutput)
+	}
+	if err := outdir.Prune(keep...); err != nil {
+		s.logger.Debug(fmt.Sprintf("prune old outputs: %v", err))
+	}
+}
+
+func (s *Supervisor) setState(state State) {
+	s.snapshotM.Lock()
+	s.snapshot.State = state
+	s.snapshotM.Unlock()
 }
