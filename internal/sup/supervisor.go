@@ -54,6 +54,7 @@ type Supervisor struct {
 	buildCancel   context.CancelFunc
 	snapshot      Snapshot
 	snapshotM     sync.RWMutex
+	buildWG       sync.WaitGroup
 	runM          sync.Mutex
 	running       bool
 }
@@ -101,6 +102,7 @@ func (s *Supervisor) Run(ctx context.Context) error {
 	s.runM.Unlock()
 	defer func() {
 		s.cancelBuild()
+		s.buildWG.Wait()
 		s.runM.Lock()
 		s.running = false
 		s.runM.Unlock()
@@ -206,7 +208,9 @@ func (s *Supervisor) startBuild(ctx context.Context) {
 	s.snapshot.State = Building
 	s.snapshotM.Unlock()
 
+	s.buildWG.Add(1)
 	go func() {
+		defer s.buildWG.Done()
 		result := s.builder.Build(buildCtx, spec)
 		s.Send(BuildFinishedEvent{BuildID: buildID, Result: result})
 	}()
