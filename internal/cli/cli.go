@@ -1,14 +1,17 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
+
+	"github.com/reihanboo/ember/internal/proc"
 )
 
 type command struct {
 	name    string
-	handler func() error
+	handler func(context.Context, *proc.Registry) error
 }
 
 var commands = []command{
@@ -18,10 +21,20 @@ var commands = []command{
 	{name: "stop", handler: stopCommand},
 	{name: "start", handler: startCommand},
 	{name: "status", handler: statusCommand},
-	{name: "init", handler: initCommand},
+	{name: "init", handler: func(context.Context, *proc.Registry) error { return initCommand() }},
 }
 
 func Run(args []string, stdout, stderr io.Writer) int {
+	return RunContext(context.Background(), nil, args, stdout, stderr)
+}
+
+func RunContext(ctx context.Context, registry *proc.Registry, args []string, stdout, stderr io.Writer) int {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if registry == nil {
+		registry = &proc.Registry{}
+	}
 	if len(args) == 0 {
 		printUsage(stderr)
 		return 1
@@ -32,7 +45,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	}
 	for _, item := range commands {
 		if args[0] == item.name {
-			if err := item.handler(); err != nil {
+			if err := item.handler(ctx, registry); err != nil {
 				fmt.Fprintln(stderr, err)
 				return 1
 			}
@@ -51,26 +64,26 @@ func printUsage(w io.Writer) {
 	}
 }
 
-func runCommand() error {
+func runCommand(context.Context, *proc.Registry) error {
 	return errors.New("not implemented")
 }
 
-func reloadCommand() error {
+func reloadCommand(context.Context, *proc.Registry) error {
 	return errors.New("not implemented")
 }
 
-func buildCommand() error {
+func buildCommand(context.Context, *proc.Registry) error {
 	return errors.New("not implemented")
 }
 
-func stopCommand() error {
+func stopCommand(context.Context, *proc.Registry) error {
 	return errors.New("not implemented")
 }
 
-func startCommand() error {
+func startCommand(context.Context, *proc.Registry) error {
 	return errors.New("not implemented")
 }
 
-func statusCommand() error {
+func statusCommand(context.Context, *proc.Registry) error {
 	return errors.New("not implemented")
 }
