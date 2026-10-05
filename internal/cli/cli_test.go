@@ -20,7 +20,6 @@ func TestRun(t *testing.T) {
 		{name: "stop", args: []string{"stop"}, wantStatus: 1, wantStderr: "not implemented\n"},
 		{name: "start", args: []string{"start"}, wantStatus: 1, wantStderr: "not implemented\n"},
 		{name: "status", args: []string{"status"}, wantStatus: 1, wantStderr: "not implemented\n"},
-		{name: "init", args: []string{"init"}, wantStatus: 1, wantStderr: "not implemented\n"},
 		{name: "unknown", args: []string{"unknown"}, wantStatus: 1, wantStderr: usage},
 		{name: "missing", wantStatus: 1, wantStderr: usage},
 		{name: "help", args: []string{"-h"}, wantStdout: usage},
@@ -41,5 +40,4 @@ func TestRun(t *testing.T) {
 			}
 		})
 	}
-
 }

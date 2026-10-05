@@ -74,7 +74,3 @@ func startCommand() error {
 func statusCommand() error {
 	return errors.New("not implemented")
 }
-
-func initCommand() error {
-	return errors.New("not implemented")
-}
