@@ -11,10 +11,14 @@ type Event interface {
 	isEvent()
 }
 
-type ChangeEvent struct {
+type FileChanged struct {
 	Paths []string
 	At    time.Time
 }
+
+type ChangeEvent = FileChanged
+
+type ReloadRequested struct{}
 
 type ControlEvent struct {
 	Command string
@@ -33,7 +37,8 @@ type BuildFinishedEvent struct {
 	Result build.Result
 }
 
-func (ChangeEvent) isEvent()        {}
+func (FileChanged) isEvent()        {}
+func (ReloadRequested) isEvent()    {}
 func (ControlEvent) isEvent()       {}
 func (KeyEvent) isEvent()           {}
 func (ChildExitEvent) isEvent()     {}
