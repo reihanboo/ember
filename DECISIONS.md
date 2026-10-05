@@ -6,3 +6,4 @@ Linux abrupt-parent cleanup tests verify the direct child; grandchild cleanup de
 Output paths start at app-1 per process; Next returns paths without creating .ember/bin.
 Prune preserves .pdb/.ilk siblings for kept outputs along with the output itself.
 Supervisor events use change, control, key, child-exit, and build-finish values; invalid states stringify as Unknown.
+The event-loop skeleton logs unhandled events and injects builder, runner, clock, and logger interfaces.
