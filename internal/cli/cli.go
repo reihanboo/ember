@@ -84,7 +84,11 @@ func printUsage(w io.Writer) {
 	}
 }
 
-func runCommand(ctx context.Context, registry *proc.Registry, stdout, stderr io.Writer) (returnErr error) {
+func runCommand(ctx context.Context, registry *proc.Registry, stdout, stderr io.Writer) error {
+	return runCommandWithKeyReader(ctx, registry, stdout, stderr, ui.ReadKeyContext)
+}
+
+func runCommandWithKeyReader(ctx context.Context, registry *proc.Registry, stdout, stderr io.Writer, readKey func(context.Context, *os.File) (rune, bool, error)) (returnErr error) {
 	if registry == nil {
 		registry = &proc.Registry{}
 	}
@@ -116,8 +120,16 @@ func runCommand(ctx context.Context, registry *proc.Registry, stdout, stderr io.
 	if err != nil {
 		return fmt.Errorf("create watcher: %w", err)
 	}
+	var watcherCloseOnce sync.Once
+	var watcherCloseErr error
+	closeWatcher := func() error {
+		watcherCloseOnce.Do(func() {
+			watcherCloseErr = projectWatcher.Close()
+		})
+		return watcherCloseErr
+	}
 	defer func() {
-		if err := projectWatcher.Close(); err != nil {
+		if err := closeWatcher(); err != nil {
 			returnErr = errors.Join(returnErr, fmt.Errorf("close watcher: %w", err))
 		}
 	}()
@@ -141,7 +153,17 @@ func runCommand(ctx context.Context, registry *proc.Registry, stdout, stderr io.
 		nil,
 		logger,
 	)
-	controlServer, err := ctl.StartServer(filepath.Join(root, ".ember", "ctl"), ctl.NewDispatcher(supervisor))
+	shutdownRequests := make(chan struct{}, 1)
+	requestShutdown := func() {
+		select {
+		case shutdownRequests <- struct{}{}:
+		default:
+		}
+	}
+	controlServer, err := ctl.StartServer(filepath.Join(root, ".ember", "ctl"), ctl.NewDispatcher(runEventSender{
+		supervisor:      supervisor,
+		requestShutdown: requestShutdown,
+	}))
 	if err != nil {
 		return fmt.Errorf("start control server: %w", err)
 	}
@@ -151,7 +173,7 @@ func runCommand(ctx context.Context, registry *proc.Registry, stdout, stderr io.
 		}
 	}()
 
-	runCtx, cancel := context.WithCancel(ctx)
+	runCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	changes := projectWatcher.Watch(runCtx, time.Duration(settings.Watch.DebounceMS)*time.Millisecond)
 	forwardingDone := make(chan struct{})
@@ -174,18 +196,29 @@ func runCommand(ctx context.Context, registry *proc.Registry, stdout, stderr io.
 	go func() {
 		supervisorDone <- supervisor.Run(runCtx)
 	}()
-	go readKeyboard(runCtx, os.Stdin, stdout, supervisor, logger, cancel)
+	go readKeyboard(runCtx, os.Stdin, stdout, supervisor, logger, readKey, requestShutdown)
 	supervisor.Send(sup.ReloadRequested{})
+	supervisorStopped := false
 	select {
-	case err := <-supervisorDone:
-		returnErr = err
-	case <-runCtx.Done():
-		returnErr = <-supervisorDone
+	case returnErr = <-supervisorDone:
+		supervisorStopped = true
+	case <-ctx.Done():
+	case <-shutdownRequests:
+	}
+
+	if err := closeWatcher(); err != nil {
+		returnErr = errors.Join(returnErr, fmt.Errorf("close watcher: %w", err))
 	}
 	cancel()
 	<-forwardingDone
+	if !supervisorStopped {
+		returnErr = errors.Join(returnErr, <-supervisorDone)
+	}
 	if err := registry.StopAll(context.Background(), killTimeout); err != nil {
 		returnErr = errors.Join(returnErr, fmt.Errorf("stop app: %w", err))
+	}
+	if err := controlServer.Close(); err != nil {
+		returnErr = errors.Join(returnErr, fmt.Errorf("close control server: %w", err))
 	}
 	return returnErr
 }
@@ -200,9 +233,22 @@ type appRunner struct {
 	registry *proc.Registry
 }
 
-func readKeyboard(ctx context.Context, input *os.File, output io.Writer, supervisor *sup.Supervisor, logger *ui.Logger, cancel context.CancelFunc) {
+type runEventSender struct {
+	supervisor      *sup.Supervisor
+	requestShutdown func()
+}
+
+func (sender runEventSender) Send(event sup.Event) {
+	if _, ok := event.(sup.QuitRequested); ok {
+		sender.requestShutdown()
+		return
+	}
+	sender.supervisor.Send(event)
+}
+
+func readKeyboard(ctx context.Context, input *os.File, output io.Writer, supervisor *sup.Supervisor, logger *ui.Logger, readKey func(context.Context, *os.File) (rune, bool, error), requestShutdown func()) {
 	for {
-		key, read, err := ui.ReadKeyContext(ctx, input)
+		key, read, err := readKey(ctx, input)
 		if err != nil {
 			if ctx.Err() == nil && !errors.Is(err, io.EOF) {
 				logger.Error(err.Error())
@@ -238,7 +284,7 @@ func readKeyboard(ctx context.Context, input *os.File, output io.Writer, supervi
 				logger.Error(err.Error())
 			}
 		case ui.QuitKey:
-			cancel()
+			requestShutdown()
 			return
 		}
 	}

@@ -39,7 +39,7 @@ func TestDispatcherSendsSupervisorEventsAndRepliesOK(t *testing.T) {
 		{request: RequestStop, want: sup.StopRequested{}},
 		{request: RequestStart, want: sup.StartRequested{}},
 		{request: RequestStatus, want: sup.StatusRequested{}},
-		{request: RequestQuit, want: sup.ControlEvent{Command: "quit"}},
+		{request: RequestQuit, want: sup.QuitRequested{}},
 	}
 	for _, test := range tests {
 		wantResponse := []string{"ok"}

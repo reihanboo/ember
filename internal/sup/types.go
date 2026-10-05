@@ -38,6 +38,8 @@ type ControlEvent struct {
 	Command string
 }
 
+type QuitRequested struct{}
+
 type KeyEvent struct {
 	Key rune
 }
@@ -61,6 +63,7 @@ func (StopRequested) isEvent()      {}
 func (StartRequested) isEvent()     {}
 func (StatusRequested) isEvent()    {}
 func (ControlEvent) isEvent()       {}
+func (QuitRequested) isEvent()      {}
 func (KeyEvent) isEvent()           {}
 func (ChildExited) isEvent()        {}
 func (BuildFinishedEvent) isEvent() {}

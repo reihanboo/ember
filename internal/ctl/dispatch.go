@@ -48,7 +48,7 @@ func eventForRequest(request Request) (sup.Event, <-chan error, <-chan sup.Snaps
 		reply := make(chan sup.Snapshot, 1)
 		return sup.StatusRequested{Reply: reply}, nil, reply, nil
 	case RequestQuit:
-		return sup.ControlEvent{Command: string(request)}, nil, nil, nil
+		return sup.QuitRequested{}, nil, nil, nil
 	default:
 		return nil, nil, nil, fmt.Errorf("unsupported control request %q", request)
 	}

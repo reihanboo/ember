@@ -3,14 +3,18 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/reihanboo/ember/internal/ctl"
+	"github.com/reihanboo/ember/internal/proc"
 )
 
 func TestRunBuildsStartsAndReloadsOnChange(t *testing.T) {
@@ -87,6 +91,122 @@ color = false
 	case <-time.After(5 * time.Second):
 		t.Fatal("run command did not stop after context cancellation")
 	}
+}
+
+func TestRunShutdownCleansResourcesForEveryTrigger(t *testing.T) {
+	for _, trigger := range []string{"context cancellation", "keyboard q", "control quit"} {
+		t.Run(trigger, func(t *testing.T) {
+			root := t.TempDir()
+			runCommand := "echo started >> run.log; sleep 60"
+			if runtime.GOOS == "windows" {
+				runCommand = "echo started >> run.log & ping -n 61 127.0.0.1 > nul"
+			}
+			configContents := `[watch]
+paths = ["."]
+include = ["*.c"]
+ignore = [".ember/**", "build.log", "run.log"]
+debounce_ms = 50
+poll = true
+
+[build]
+cmd = "echo built >> build.log"
+
+[run]
+cmd = "` + runCommand + `"
+cwd = "."
+kill_timeout_ms = 2000
+
+[ui]
+color = false
+`
+			if err := os.WriteFile(filepath.Join(root, "ember.toml"), []byte(configContents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			previousDirectory, err := os.Getwd()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chdir(root); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := os.Chdir(previousDirectory); err != nil {
+					t.Error(err)
+				}
+			})
+
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			keyEvents := make(chan rune)
+			readKey := func(ctx context.Context, _ *os.File) (rune, bool, error) {
+				select {
+				case key := <-keyEvents:
+					return key, true, nil
+				case <-ctx.Done():
+					return 0, false, ctx.Err()
+				}
+			}
+			result := make(chan error, 1)
+			go func() {
+				result <- runCommandWithKeyReader(ctx, &proc.Registry{}, io.Discard, io.Discard, readKey)
+			}()
+
+			controlFile := filepath.Join(root, ".ember", "ctl")
+			pid := waitForControlPID(t, controlFile)
+			switch trigger {
+			case "context cancellation":
+				cancel()
+			case "keyboard q":
+				keyEvents <- 'q'
+			case "control quit":
+				response, err := ctl.SendRequest(context.Background(), controlFile, ctl.RequestQuit)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.Join(response, "\n") != "ok" {
+					t.Fatalf("quit response = %#v, want ok", response)
+				}
+			}
+
+			select {
+			case err := <-result:
+				if err != nil {
+					t.Errorf("runCommandWithKeyReader() error = %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("run command did not stop")
+			}
+			cancel()
+			if _, err := os.Stat(controlFile); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("control file stat error = %v, want file removed", err)
+			}
+			if err := waitForProcessExit(pid, 5*time.Second); err != nil {
+				t.Errorf("app process cleanup: %v", err)
+			}
+		})
+	}
+}
+
+func waitForControlPID(t *testing.T, controlFile string) int {
+	t.Helper()
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		lines, err := ctl.SendRequest(context.Background(), controlFile, ctl.RequestStatus)
+		if err == nil {
+			for _, line := range lines {
+				key, value, found := strings.Cut(line, "=")
+				if key == "pid" && found {
+					pid, err := strconv.Atoi(value)
+					if err == nil && pid > 0 {
+						return pid
+					}
+				}
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatal("timed out waiting for a running app process")
+	return 0
 }
 
 func waitForLineCount(t *testing.T, path string, count int) {
