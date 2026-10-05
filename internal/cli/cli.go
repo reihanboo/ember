@@ -12,6 +12,7 @@ import (
 
 	"github.com/reihanboo/ember/internal/build"
 	"github.com/reihanboo/ember/internal/config"
+	"github.com/reihanboo/ember/internal/ctl"
 	"github.com/reihanboo/ember/internal/proc"
 	"github.com/reihanboo/ember/internal/sup"
 	"github.com/reihanboo/ember/internal/ui"
@@ -136,6 +137,15 @@ func runCommand(ctx context.Context, registry *proc.Registry, stdout, stderr io.
 		nil,
 		logger,
 	)
+	controlServer, err := ctl.StartServer(filepath.Join(root, ".ember", "ctl"), ctl.NewDispatcher(supervisor))
+	if err != nil {
+		return fmt.Errorf("start control server: %w", err)
+	}
+	defer func() {
+		if err := controlServer.Close(); err != nil {
+			returnErr = errors.Join(returnErr, fmt.Errorf("close control server: %w", err))
+		}
+	}()
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -235,6 +245,27 @@ func startCommand(context.Context, *proc.Registry, io.Writer, io.Writer) error {
 	return errors.New("not implemented")
 }
 
-func statusCommand(context.Context, *proc.Registry, io.Writer, io.Writer) error {
-	return errors.New("not implemented")
+func statusCommand(ctx context.Context, _ *proc.Registry, stdout, _ io.Writer) error {
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("get working directory: %w", err)
+	}
+	root, _, err := config.Find(workingDirectory)
+	if err != nil {
+		return err
+	}
+	lines, err := ctl.SendRequest(ctx, filepath.Join(root, ".ember", "ctl"), ctl.RequestStatus)
+	if err != nil {
+		return err
+	}
+	status, err := renderStatus(lines)
+	if err != nil {
+		return fmt.Errorf("render control status: %w", err)
+	}
+	for _, line := range status {
+		if _, err := fmt.Fprintln(stdout, line); err != nil {
+			return fmt.Errorf("write status: %w", err)
+		}
+	}
+	return nil
 }

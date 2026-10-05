@@ -30,6 +30,10 @@ type StartRequested struct {
 	Reply chan error
 }
 
+type StatusRequested struct {
+	Reply chan Snapshot
+}
+
 type ControlEvent struct {
 	Command string
 }
@@ -55,6 +59,7 @@ func (ReloadRequested) isEvent()    {}
 func (BuildOnlyRequested) isEvent() {}
 func (StopRequested) isEvent()      {}
 func (StartRequested) isEvent()     {}
+func (StatusRequested) isEvent()    {}
 func (ControlEvent) isEvent()       {}
 func (KeyEvent) isEvent()           {}
 func (ChildExited) isEvent()        {}

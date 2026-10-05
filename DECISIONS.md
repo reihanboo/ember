@@ -12,3 +12,4 @@ Control responses use a dot terminator line and dot-stuff payload lines beginnin
 The control server handles one valid request per connection through a synchronous response handler.
 A control instance is live only when it returns a valid response to a status probe within one second.
 Control dispatch maps reload/build/stop/start to dedicated supervisor events and waits for stop/start replies.
+Status uses integer truncated milliseconds and RFC3339Nano timestamps; unset last_change is empty and rendered as never.

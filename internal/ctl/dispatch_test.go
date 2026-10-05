@@ -12,6 +12,7 @@ import (
 type fakeEventSender struct {
 	events   chan sup.Event
 	replyErr error
+	snapshot sup.Snapshot
 }
 
 func (sender fakeEventSender) Send(event sup.Event) {
@@ -21,6 +22,8 @@ func (sender fakeEventSender) Send(event sup.Event) {
 		requested.Reply <- sender.replyErr
 	case sup.StartRequested:
 		requested.Reply <- sender.replyErr
+	case sup.StatusRequested:
+		requested.Reply <- sender.snapshot
 	}
 }
 
@@ -35,12 +38,16 @@ func TestDispatcherSendsSupervisorEventsAndRepliesOK(t *testing.T) {
 		{request: RequestBuild, want: sup.BuildOnlyRequested{}},
 		{request: RequestStop, want: sup.StopRequested{}},
 		{request: RequestStart, want: sup.StartRequested{}},
-		{request: RequestStatus, want: sup.ControlEvent{Command: "status"}},
+		{request: RequestStatus, want: sup.StatusRequested{}},
 		{request: RequestQuit, want: sup.ControlEvent{Command: "quit"}},
 	}
 	for _, test := range tests {
-		if response := dispatch(test.request); !reflect.DeepEqual(response, []string{"ok"}) {
-			t.Errorf("dispatch(%q) = %#v, want [\"ok\"]", test.request, response)
+		wantResponse := []string{"ok"}
+		if test.request == RequestStatus {
+			wantResponse = SnapshotLines(sender.snapshot)
+		}
+		if response := dispatch(test.request); !reflect.DeepEqual(response, wantResponse) {
+			t.Errorf("dispatch(%q) = %#v, want %#v", test.request, response, wantResponse)
 		}
 		got := <-sender.events
 		switch test.request {
@@ -53,6 +60,11 @@ func TestDispatcherSendsSupervisorEventsAndRepliesOK(t *testing.T) {
 			requested, ok := got.(sup.StartRequested)
 			if !ok || requested.Reply == nil {
 				t.Errorf("event for %q = %#v, want StartRequested with reply channel", test.request, got)
+			}
+		case RequestStatus:
+			requested, ok := got.(sup.StatusRequested)
+			if !ok || requested.Reply == nil {
+				t.Errorf("event for %q = %#v, want StatusRequested with reply channel", test.request, got)
 			}
 		default:
 			if !reflect.DeepEqual(got, test.want) {

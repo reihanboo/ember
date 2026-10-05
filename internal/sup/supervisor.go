@@ -184,6 +184,11 @@ func (s *Supervisor) handle(ctx context.Context, event Event) {
 		if requested.Reply != nil {
 			requested.Reply <- err
 		}
+	case StatusRequested:
+		requested := event.(StatusRequested)
+		if requested.Reply != nil {
+			requested.Reply <- s.Snapshot()
+		}
 	case ChildExited:
 		exited := event.(ChildExited)
 		currentPID := 0
