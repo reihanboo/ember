@@ -24,3 +24,4 @@ The Windows example uses `cl`, so start it from a Developer PowerShell with the 
 - [Platform notes](docs/platform-notes.md): locked executables and WSL
 - [Zed](docs/editors/zed.md): reload the running project from a task or key binding
 - [Neovim](docs/editors/nvim.md): reload from a keymap or optional save hook
+- [Lite XL](docs/editors/litexl.md): reload from a command or key binding
