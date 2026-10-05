@@ -9,3 +9,4 @@ Supervisor events use change, control, key, child-exit, and build-finish values;
 The event-loop skeleton logs unhandled events and injects builder, runner, clock, and logger interfaces.
 Build triggers receive a copied build.Spec with {out} substituted; a new trigger cancels and supersedes an active build.
 Control responses use a dot terminator line and dot-stuff payload lines beginning with a dot.
+The control server handles one valid request per connection through a synchronous response handler.
