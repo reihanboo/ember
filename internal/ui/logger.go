@@ -37,6 +37,10 @@ func (l *Logger) Debug(message string) {
 	l.write(DebugLevel, "DEBUG", "36", message)
 }
 
+func (l *Logger) Verbose(message string) {
+	l.write(DebugLevel, "DEBUG", "36", message)
+}
+
 func (l *Logger) Info(message string) {
 	l.write(InfoLevel, "INFO", "32", message)
 }

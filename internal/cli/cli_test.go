@@ -424,7 +424,7 @@ func TestControlCommandReturnsOneOnServerError(t *testing.T) {
 }
 
 func TestRun(t *testing.T) {
-	usage := "Usage: ember <command>\n\nCommands:\n  run\n  reload\n  build\n  stop\n  start\n  status\n  init\n"
+	usage := "Usage: ember [--verbose] <command>\n\nCommands:\n  run\n  reload\n  build\n  stop\n  start\n  status\n  init\n"
 	tests := []struct {
 		name       string
 		args       []string

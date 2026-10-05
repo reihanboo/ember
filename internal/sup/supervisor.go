@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -128,6 +129,11 @@ func (s *Supervisor) Snapshot() Snapshot {
 
 func (s *Supervisor) handle(ctx context.Context, event Event) {
 	if change, ok := event.(FileChanged); ok {
+		if len(change.Paths) == 0 {
+			s.logVerbose("changed paths: all")
+		} else {
+			s.logVerbose(fmt.Sprintf("changed paths: %s", strings.Join(change.Paths, ", ")))
+		}
 		changedAt := change.At
 		if changedAt.IsZero() {
 			changedAt = s.clock.Now()
@@ -209,6 +215,7 @@ func (s *Supervisor) handle(ctx context.Context, event Event) {
 		s.logger.Debug(fmt.Sprintf("app process %d exited with code %d", exited.PID, exited.Result.Code))
 	case BuildFinishedEvent:
 		finished := event.(BuildFinishedEvent)
+		s.logVerbose(fmt.Sprintf("build %d finished in %s (exit %d)", finished.BuildID, finished.Result.Duration, finished.Result.ExitCode))
 		if finished.BuildID != s.buildID {
 			s.logger.Debug(fmt.Sprintf("discarded stale build result %d; active build is %d", finished.BuildID, s.buildID))
 			return
@@ -229,6 +236,7 @@ func (s *Supervisor) startBuild(ctx context.Context, buildOnly bool) {
 	s.buildOnly = buildOnly
 	s.buildID++
 	buildID := s.buildID
+	s.logVerbose(fmt.Sprintf("build %d started", buildID))
 	buildCtx, cancel := context.WithCancel(ctx)
 	s.buildCancel = cancel
 
@@ -410,4 +418,12 @@ func (s *Supervisor) logStatus(status ui.BuildStatus) {
 		return
 	}
 	logger.Status(status)
+}
+
+func (s *Supervisor) logVerbose(message string) {
+	logger, ok := s.logger.(interface{ Verbose(string) })
+	if !ok {
+		return
+	}
+	logger.Verbose(message)
 }

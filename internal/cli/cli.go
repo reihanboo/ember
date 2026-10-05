@@ -51,6 +51,19 @@ func RunContext(ctx context.Context, registry *proc.Registry, args []string, std
 	if stderr == nil {
 		stderr = io.Discard
 	}
+	verbose := false
+	commandArgs := make([]string, 0, len(args))
+	for _, arg := range args {
+		if arg == "--verbose" {
+			verbose = true
+			continue
+		}
+		commandArgs = append(commandArgs, arg)
+	}
+	args = commandArgs
+	if verbose {
+		ctx = context.WithValue(ctx, verboseContextKey{}, true)
+	}
 	if len(args) == 0 {
 		printUsage(stderr)
 		return 1
@@ -77,18 +90,25 @@ func RunContext(ctx context.Context, registry *proc.Registry, args []string, std
 }
 
 func printUsage(w io.Writer) {
-	fmt.Fprintln(w, "Usage: ember <command>")
+	fmt.Fprintln(w, "Usage: ember [--verbose] <command>")
 	fmt.Fprintln(w, "\nCommands:")
 	for _, item := range commands {
 		fmt.Fprintf(w, "  %s\n", item.name)
 	}
 }
 
+type verboseContextKey struct{}
+
 func runCommand(ctx context.Context, registry *proc.Registry, stdout, stderr io.Writer) error {
-	return runCommandWithKeyReader(ctx, registry, stdout, stderr, ui.ReadKeyContext)
+	verbose, _ := ctx.Value(verboseContextKey{}).(bool)
+	return runCommandWithKeyReaderVerbose(ctx, registry, stdout, stderr, ui.ReadKeyContext, verbose)
 }
 
-func runCommandWithKeyReader(ctx context.Context, registry *proc.Registry, stdout, stderr io.Writer, readKey func(context.Context, *os.File) (rune, bool, error)) (returnErr error) {
+func runCommandWithKeyReader(ctx context.Context, registry *proc.Registry, stdout, stderr io.Writer, readKey func(context.Context, *os.File) (rune, bool, error)) error {
+	return runCommandWithKeyReaderVerbose(ctx, registry, stdout, stderr, readKey, false)
+}
+
+func runCommandWithKeyReaderVerbose(ctx context.Context, registry *proc.Registry, stdout, stderr io.Writer, readKey func(context.Context, *os.File) (rune, bool, error), verbose bool) (returnErr error) {
 	if registry == nil {
 		registry = &proc.Registry{}
 	}
@@ -142,7 +162,11 @@ func runCommandWithKeyReader(ctx context.Context, registry *proc.Registry, stdou
 	if !filepath.IsAbs(runCwd) {
 		runCwd = filepath.Join(root, runCwd)
 	}
-	logger := ui.NewLogger(stderr, time.Now, settings.UI.Color, ui.InfoLevel)
+	logLevel := ui.InfoLevel
+	if verbose {
+		logLevel = ui.DebugLevel
+	}
+	logger := ui.NewLogger(stderr, time.Now, settings.UI.Color, logLevel)
 	supervisor := sup.NewSupervisor(
 		commandBuilder{},
 		appRunner{registry: registry},
