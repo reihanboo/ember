@@ -2,6 +2,7 @@ package watcher
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,13 +10,23 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/reihanboo/ember/internal/ui"
 )
 
 type Change struct {
 	Paths []string
 }
 
+type warningLogger interface {
+	Warn(string)
+}
+
 func Watch(ctx context.Context, watcher *fsnotify.Watcher, filter *Filter, delay time.Duration) <-chan Change {
+	logger := ui.NewLogger(os.Stderr, time.Now, false, ui.WarnLevel)
+	return watch(ctx, watcher, filter, delay, watcher.Events, watcher.Errors, logger)
+}
+
+func watch(ctx context.Context, watcher *fsnotify.Watcher, filter *Filter, delay time.Duration, events <-chan fsnotify.Event, watcherErrors <-chan error, logger warningLogger) <-chan Change {
 	changes := make(chan Change)
 	done := make(chan struct{})
 	var emissionMu sync.Mutex
@@ -44,12 +55,12 @@ func Watch(ctx context.Context, watcher *fsnotify.Watcher, filter *Filter, delay
 		}()
 
 		tracked := trackedDirectories(watcher)
-		watchErrors := watcher.Errors
+		watchErrors := watcherErrors
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case event, ok := <-watcher.Events:
+			case event, ok := <-events:
 				if !ok {
 					return
 				}
@@ -83,9 +94,19 @@ func Watch(ctx context.Context, watcher *fsnotify.Watcher, filter *Filter, delay
 				if filter.Allow(path) {
 					debouncer.Add(path)
 				}
-			case _, ok := <-watchErrors:
+			case watcherErr, ok := <-watchErrors:
 				if !ok {
 					watchErrors = nil
+					continue
+				}
+				if watcherErr == nil {
+					continue
+				}
+				logger.Warn(fmt.Sprintf("fsnotify watcher error: %v", watcherErr))
+				select {
+				case changes <- Change{}:
+				case <-ctx.Done():
+				case <-done:
 				}
 			}
 		}
