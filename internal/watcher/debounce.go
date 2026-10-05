@@ -22,6 +22,7 @@ type Debouncer struct {
 	pending    map[string]struct{}
 	timer      Timer
 	generation uint64
+	closed     bool
 }
 
 type systemClock struct{}
@@ -48,6 +49,9 @@ func (d *Debouncer) Add(path string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
+	if d.closed {
+		return
+	}
 	if d.pending == nil {
 		d.pending = make(map[string]struct{})
 	}
@@ -62,9 +66,25 @@ func (d *Debouncer) Add(path string) {
 	})
 }
 
+func (d *Debouncer) Close() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if d.closed {
+		return
+	}
+	d.closed = true
+	d.generation++
+	if d.timer != nil {
+		d.timer.Stop()
+		d.timer = nil
+	}
+	d.pending = nil
+}
+
 func (d *Debouncer) flush(generation uint64) {
 	d.mu.Lock()
-	if generation != d.generation || len(d.pending) == 0 {
+	if d.closed || generation != d.generation || len(d.pending) == 0 {
 		d.mu.Unlock()
 		return
 	}

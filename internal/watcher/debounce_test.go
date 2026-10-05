@@ -137,3 +137,20 @@ func TestDebouncerDeduplicatesPaths(t *testing.T) {
 		t.Errorf("batches = %#v, want one batch of unique sorted paths", batches)
 	}
 }
+
+func TestDebouncerCloseStopsPendingBatch(t *testing.T) {
+	clock := newFakeClock()
+	var batches [][]string
+	debouncer := NewDebouncer(time.Hour, clock, func(batch []string) {
+		batches = append(batches, batch)
+	})
+
+	debouncer.Add("pending.c")
+	debouncer.Close()
+	clock.Advance(2 * time.Hour)
+	debouncer.Add("after-close.c")
+
+	if len(batches) != 0 {
+		t.Errorf("batches after close = %#v, want none", batches)
+	}
+}
