@@ -159,7 +159,8 @@ func TestRunCancellationKillsProcessTree(t *testing.T) {
 }
 
 func TestRunCommandNotFound(t *testing.T) {
-	result := Run(context.Background(), Spec{Cmd: "ember-command-that-does-not-exist"})
+	var output bytes.Buffer
+	result := Run(context.Background(), Spec{Cmd: "ember-command-that-does-not-exist", Output: &output})
 	if result.Success {
 		t.Fatalf("Run() success = true, want false")
 	}
@@ -168,5 +169,8 @@ func TestRunCommandNotFound(t *testing.T) {
 	}
 	if result.Err == nil {
 		t.Error("Run() error = nil, want command-not-found error")
+	}
+	if got := output.String(); !strings.Contains(got, "[build] command not found: ember-command-that-does-not-exist") {
+		t.Errorf("Run() output = %q, want command-not-found hint", got)
 	}
 }

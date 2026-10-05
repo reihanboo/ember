@@ -3,7 +3,10 @@ package build
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"os/exec"
+	"runtime"
 	"time"
 
 	"github.com/reihanboo/ember/internal/proc"
@@ -28,6 +31,16 @@ func Run(ctx context.Context, spec Spec) Result {
 	started := time.Now()
 	if err := ctx.Err(); err != nil {
 		return Result{Cancelled: true, Duration: time.Since(started), ExitCode: -1, Err: err}
+	}
+	if hint := commandHint(spec.Cmd, exec.LookPath, runtime.GOOS == "windows"); hint != "" {
+		output := spec.Output
+		if output == nil {
+			output = io.Discard
+		}
+		if _, err := fmt.Fprintf(output, "[build] %s\n", hint); err != nil {
+			return Result{Duration: time.Since(started), ExitCode: -1, Err: fmt.Errorf("write command hint: %w", err)}
+		}
+		return Result{Duration: time.Since(started), ExitCode: 127, Err: errors.New(hint)}
 	}
 	process, err := proc.Start(context.Background(), proc.Spec{
 		Cmd:    spec.Cmd,

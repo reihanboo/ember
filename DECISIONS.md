@@ -16,3 +16,4 @@ Status uses integer truncated milliseconds and RFC3339Nano timestamps; unset las
 Missing or invalid port files and failed connections are treated as no running instance by CLI clients.
 Keyboard input returns one byte as a rune because configured hotkeys are ASCII.
 The stop/start toggle stops when snapshot PID is nonzero; q and Ctrl+C both cancel the run.
+Build preflight reports missing external commands before launch and ignores shell built-ins.
