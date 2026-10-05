@@ -49,6 +49,12 @@ func (l *Logger) Error(message string) {
 	l.write(ErrorLevel, "ERROR", "31", message)
 }
 
+func (l *Logger) Status(status BuildStatus) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	fmt.Fprintln(l.writer, RenderBuildStatus(status, l.color))
+}
+
 func (l *Logger) write(level Level, tag, colorCode, message string) {
 	if level < l.minLevel {
 		return

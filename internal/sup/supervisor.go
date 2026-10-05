@@ -240,6 +240,7 @@ func (s *Supervisor) startBuild(ctx context.Context, buildOnly bool) {
 	s.snapshotM.Lock()
 	s.snapshot.State = Building
 	s.snapshotM.Unlock()
+	s.logStatus(ui.BuildStatus{Kind: ui.BuildStarted})
 
 	s.buildWG.Add(1)
 	go func() {
@@ -275,6 +276,11 @@ func (s *Supervisor) finishBuild(ctx context.Context, result build.Result) {
 	}
 	if !result.Success {
 		s.setState(BuildFailed)
+		pid := 0
+		if s.process != nil {
+			pid = s.process.Pid()
+		}
+		s.logStatus(ui.BuildStatus{Kind: ui.BuildFailed, ExitCode: result.ExitCode, PID: pid})
 		failure := result.Err
 		if failure == nil {
 			failure = fmt.Errorf("exit code %d", result.ExitCode)
@@ -293,6 +299,7 @@ func (s *Supervisor) finishBuild(ctx context.Context, result build.Result) {
 			state = Running
 		}
 		s.setState(state)
+		s.logStatus(ui.BuildStatus{Kind: ui.BuildSucceeded, Duration: result.Duration})
 		return
 	}
 	s.restartApp(ctx)
@@ -311,6 +318,12 @@ func (s *Supervisor) restartApp(ctx context.Context) {
 		return
 	}
 	s.pruneOutputs(previousOutput)
+	snapshot := s.Snapshot()
+	s.logStatus(ui.BuildStatus{
+		Kind:     ui.BuildSucceeded,
+		Duration: snapshot.LastBuildDuration,
+		PID:      snapshot.PID,
+	})
 }
 
 func (s *Supervisor) startLastBuiltApp(ctx context.Context) error {
@@ -389,4 +402,12 @@ func (s *Supervisor) setState(state State) {
 	s.snapshotM.Lock()
 	s.snapshot.State = state
 	s.snapshotM.Unlock()
+}
+
+func (s *Supervisor) logStatus(status ui.BuildStatus) {
+	logger, ok := s.logger.(interface{ Status(ui.BuildStatus) })
+	if !ok {
+		return
+	}
+	logger.Status(status)
 }
