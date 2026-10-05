@@ -1,0 +1,18 @@
+[watch]
+paths = ["."]
+include = ["**/*.c", "**/*.h", "ember.toml", "ember.clang.toml", "ember.gcc.toml"]
+ignore = [".git/**", ".ember/**"]
+debounce_ms = 150
+poll = false
+
+[build]
+cmd = "clang -std=c11 -Wall -Wextra -Wpedantic -O0 main.c -o {out}"
+stops_running = false
+
+[run]
+cmd = "{out}"
+cwd = "."
+kill_timeout_ms = 2000
+
+[ui]
+color = true
