@@ -20,6 +20,7 @@ type FSNotifyWatcher struct {
 }
 
 func NewWatcher(root string, settings config.WatchConfig) (ChangeWatcher, error) {
+	warnForWSLMount(root, settings.Poll)
 	if settings.Poll {
 		return NewPoller(root, settings)
 	}
